@@ -1,0 +1,40 @@
+//! Debugger console command AST.
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Command {
+    Run,
+    Restart,
+    Continue,
+    Pause,
+    StepInto,
+    StepOver,
+    StepReturn,
+    BreakAt(String),     // either *0xaddr or symbol name
+    Delete(u64),
+    Enable(u64),
+    Disable(u64),
+    Condition(u64, String),
+    Regs,
+    SetReg(String, String),
+    Ip,
+    SetIp(String),
+    Examine { count: u32, format: char, address: String }, // x/16gx <addr>
+    Stack,
+    Threads,
+    Modules,
+    Vmmap,
+    Symbols,
+    Imports,
+    Exports,
+    Checksec,
+    Disasm(String),
+    Search(String),
+    Cyclic(usize),
+    CyclicFind(String),
+    Rop,
+    Iat,
+    Got,
+    Plt,
+    Quit,
+    Comment(String),
+}

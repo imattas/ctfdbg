@@ -1,0 +1,14 @@
+pub mod breakpoints;
+pub mod debugger_console;
+pub mod debugger_info;
+pub mod disassembly;
+pub mod functions;
+pub mod logs;
+pub mod memory;
+pub mod modules;
+pub mod plugins;
+pub mod registers;
+pub mod stack;
+pub mod stack_trace;
+pub mod strings;
+pub mod target_console;
