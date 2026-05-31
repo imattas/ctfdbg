@@ -9,7 +9,16 @@ use goblin::pe::PE;
 
 pub fn parse_pe(bytes: &[u8], path: Option<std::path::PathBuf>) -> DbgResult<BinaryInfo> {
     let pe = PE::parse(bytes)?;
-    let arch = if pe.is_64 { Architecture::X86_64 } else { Architecture::X86 };
+    // Detect architecture from the COFF machine field (not just 32/64-bit).
+    let arch = match pe.header.coff_header.machine {
+        0x8664 => Architecture::X86_64,           // IMAGE_FILE_MACHINE_AMD64
+        0x14c => Architecture::X86,               // I386
+        0xaa64 => Architecture::AArch64,          // ARM64
+        0x1c0 | 0x1c4 => Architecture::Arm,       // ARM / ARMNT (Thumb-2)
+        0x5064 => Architecture::Riscv64,          // RISCV64
+        0x5032 => Architecture::Riscv32,          // RISCV32
+        _ => if pe.is_64 { Architecture::X86_64 } else { Architecture::X86 },
+    };
     let oh = pe.header.optional_header;
 
     let preferred_base = oh.map(|h| h.windows_fields.image_base).unwrap_or(0);

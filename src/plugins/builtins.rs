@@ -731,6 +731,400 @@ impl Plugin for SyscallSitesPlugin {
     }
 }
 
+// ============================================================ red team / RE ==
+
+/// Slice of the first executable section: (bytes, virtual_address, arch).
+fn first_exec_section(state: &AppState) -> Option<(Vec<u8>, u64, crate::target::arch::Architecture)> {
+    let info = state.binary.as_ref()?;
+    let bytes = state.binary_bytes.as_ref()?;
+    let sec = info.sections.iter().find(|s| s.executable)?;
+    let start = sec.file_offset as usize;
+    let end = (sec.file_offset + sec.file_size) as usize;
+    if start >= end || end > bytes.len() {
+        return None;
+    }
+    Some((bytes[start..end].to_vec(), sec.virtual_address, info.architecture))
+}
+
+fn arch_of(state: &AppState) -> crate::target::arch::Architecture {
+    state.binary.as_ref().map(|b| b.architecture).unwrap_or(crate::target::arch::Architecture::X86_64)
+}
+
+pub struct RevShellPlugin;
+impl Plugin for RevShellPlugin {
+    fn meta(&self) -> PluginMeta {
+        PluginMeta {
+            id: "revshell",
+            name: "Reverse / Bind Shell Generator",
+            description: "Generate reverse/bind shell one-liners + listeners. Arg: '<ip> <port> [bind]'.",
+            category: PluginCategory::Pwn,
+        }
+    }
+    fn run(&self, _state: &AppState, arg: Option<&str>) -> PluginOutput {
+        let arg = arg.unwrap_or("");
+        let mut parts = arg.split_whitespace();
+        let (Some(ip), Some(port_s)) = (parts.next(), parts.next()) else {
+            return PluginOutput::default().line("[!] usage: revshell <ip> <port> [bind]");
+        };
+        let Ok(port) = port_s.parse::<u16>() else {
+            return PluginOutput::default().line("[!] invalid port");
+        };
+        let bind = parts.next().map(|s| s.eq_ignore_ascii_case("bind")).unwrap_or(false);
+        let mut out = PluginOutput::default();
+        if bind {
+            out = out.line(format!("--- bind shells (listen on :{port}) ---"));
+            for (n, c) in crate::pwn::revshell::bind_shells(port) { out = out.line(format!("[{n}] {c}")); }
+        } else {
+            out = out.line(format!("--- reverse shells -> {ip}:{port} ---"));
+            for (n, c) in crate::pwn::revshell::reverse_shells(ip, port) { out = out.line(format!("[{n}] {c}")); }
+        }
+        out = out.line(format!("--- catch it (listeners on :{port}) ---"));
+        for (n, c) in crate::pwn::revshell::listeners(port) { out = out.line(format!("[{n}] {c}")); }
+        out
+    }
+}
+
+pub struct SyscallPlugin;
+impl Plugin for SyscallPlugin {
+    fn meta(&self) -> PluginMeta {
+        PluginMeta {
+            id: "syscall",
+            name: "Syscall Lookup",
+            description: "Look up a Linux syscall by name or number. Arg: '<name|number> [x86_64|x86|aarch64]'.",
+            category: PluginCategory::Rev,
+        }
+    }
+    fn run(&self, state: &AppState, arg: Option<&str>) -> PluginOutput {
+        let arg = arg.unwrap_or("").trim();
+        let mut parts = arg.split_whitespace();
+        let Some(key) = parts.next() else {
+            return PluginOutput::default().line("[!] usage: syscall <name|number> [arch]");
+        };
+        let arch = parts.next().map(crate::target::arch::Architecture::parse).unwrap_or_else(|| arch_of(state));
+        let out = PluginOutput::default();
+        if let Some(num) = parse_num(key).filter(|_| key.chars().all(|c| c.is_ascii_digit() || c == 'x' || c.is_ascii_hexdigit())) {
+            // numeric -> name
+            match crate::pwn::syscalls::name(num as i32, arch) {
+                Some(n) => out.line(format!("{} syscall #{} = {}", arch, num, n)),
+                None => out.line(format!("no {} syscall #{}", arch, num)),
+            }
+        } else {
+            match crate::pwn::syscalls::number(key, arch) {
+                Some(n) => out.line(format!("{} {} = #{} (0x{:x})", arch, key, n, n)),
+                None => out.line(format!("unknown {} syscall: {}", arch, key)),
+            }
+        }
+    }
+}
+
+pub struct SyscallTablePlugin;
+impl Plugin for SyscallTablePlugin {
+    fn meta(&self) -> PluginMeta {
+        PluginMeta {
+            id: "syscall-table",
+            name: "Syscall Table",
+            description: "List known Linux syscalls for an architecture. Arg: optional arch (default: target).",
+            category: PluginCategory::Rev,
+        }
+    }
+    fn run(&self, state: &AppState, arg: Option<&str>) -> PluginOutput {
+        let arch = arg.map(str::trim).filter(|s| !s.is_empty())
+            .map(crate::target::arch::Architecture::parse).unwrap_or_else(|| arch_of(state));
+        let mut out = PluginOutput::default().line(format!("syscalls ({arch}):"));
+        for (n, num) in crate::pwn::syscalls::table(arch) {
+            out = out.line(format!("  {num:>4}  {n}"));
+        }
+        out
+    }
+}
+
+pub struct RopChainPlugin;
+impl Plugin for RopChainPlugin {
+    fn meta(&self) -> PluginMeta {
+        PluginMeta {
+            id: "ropchain",
+            name: "Build execve ROP Chain (x86-64)",
+            description: "Auto-build an execve(\"/bin/sh\") syscall ROP chain from the loaded binary's gadgets.",
+            category: PluginCategory::Pwn,
+        }
+    }
+    fn run(&self, state: &AppState, _arg: Option<&str>) -> PluginOutput {
+        use crate::target::arch::Architecture;
+        let mut out = PluginOutput::default();
+        let Some((bytes, base, arch)) = first_exec_section(state) else {
+            return out.line("[!] no executable section / binary loaded");
+        };
+        if !matches!(arch, Architecture::X86_64 | Architecture::Auto) {
+            return out.line("[!] ROP chain builder currently targets x86-64 only");
+        }
+        // Discover pop gadgets + a syscall site.
+        let pops = crate::pwn::gadget::pop_reg_gadgets(&bytes, base, Architecture::X86_64).unwrap_or_default();
+        let find_pop = |reg: &str| pops.iter().find(|(_, r)| r == reg).map(|(a, _)| *a);
+        let syscall = crate::pwn::gadget::syscall_sites(&bytes, base)
+            .into_iter().find(|s| s.kind == "syscall").map(|s| s.address);
+        // Find "/bin/sh" anywhere in the file image.
+        let binsh = state.binary_bytes.as_ref().and_then(|file| {
+            let needle = b"/bin/sh";
+            file.windows(needle.len()).position(|w| w == needle).and_then(|off| {
+                let info = state.binary.as_ref()?;
+                info.sections.iter().find(|s| {
+                    let so = s.file_offset as usize;
+                    off >= so && (off as u64) < s.file_offset + s.file_size
+                }).map(|s| s.virtual_address + (off as u64 - s.file_offset))
+            })
+        });
+        let g = crate::pwn::ropchain::ExecveGadgets {
+            pop_rdi: find_pop("rdi"), pop_rsi: find_pop("rsi"),
+            pop_rdx: find_pop("rdx"), pop_rax: find_pop("rax"),
+            syscall, binsh,
+        };
+        match crate::pwn::ropchain::build_execve_x64(&g) {
+            Ok(chain) => {
+                out = out.line("execve(\"/bin/sh\", 0, 0) chain:");
+                for e in &chain { out = out.line(format!("  0x{:016x}  {}", e.value, e.comment)); }
+                for line in crate::pwn::ropchain::render_pwntools(&chain).lines() { out = out.line(line.to_string()); }
+            }
+            Err(missing) => {
+                out = out.line("[!] could not build chain; missing:");
+                for m in missing { out = out.line(format!("    - {m}")); }
+            }
+        }
+        out
+    }
+}
+
+pub struct JwtPlugin;
+impl Plugin for JwtPlugin {
+    fn meta(&self) -> PluginMeta {
+        PluginMeta {
+            id: "jwt",
+            name: "JWT Decode",
+            description: "Decode a JWT's header and payload (Base64URL). Arg: the token.",
+            category: PluginCategory::Crypto,
+        }
+    }
+    fn run(&self, _state: &AppState, arg: Option<&str>) -> PluginOutput {
+        let Some(tok) = arg.map(str::trim).filter(|s| !s.is_empty()) else {
+            return PluginOutput::default().line("[!] usage: jwt <token>");
+        };
+        match crate::pwn::encoding::jwt_decode(tok) {
+            Some((h, p)) => PluginOutput::default()
+                .line(format!("header:  {h}"))
+                .line(format!("payload: {p}")),
+            None => PluginOutput::default().line("[!] not a valid JWT (need header.payload.signature)"),
+        }
+    }
+}
+
+pub struct BaseConvertPlugin;
+impl Plugin for BaseConvertPlugin {
+    fn meta(&self) -> PluginMeta {
+        PluginMeta {
+            id: "base",
+            name: "Number Base Convert",
+            description: "Show a value in dec/hex/oct/bin (+ASCII). Arg: number (0x.., decimal).",
+            category: PluginCategory::Utility,
+        }
+    }
+    fn run(&self, _state: &AppState, arg: Option<&str>) -> PluginOutput {
+        let Some(v) = arg.and_then(parse_num) else {
+            return PluginOutput::default().line("[!] usage: base <number>");
+        };
+        let le = v.to_le_bytes();
+        let ascii: String = le.iter().take_while(|&&b| b != 0)
+            .map(|&b| if b.is_ascii_graphic() || b == b' ' { b as char } else { '.' }).collect();
+        PluginOutput::default()
+            .line(format!("dec: {v}"))
+            .line(format!("hex: 0x{v:x}"))
+            .line(format!("oct: 0o{v:o}"))
+            .line(format!("bin: 0b{v:b}"))
+            .line(format!("le bytes: {}", le.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")))
+            .line(format!("ascii (le): {ascii}"))
+    }
+}
+
+pub struct CidrPlugin;
+impl Plugin for CidrPlugin {
+    fn meta(&self) -> PluginMeta {
+        PluginMeta {
+            id: "cidr",
+            name: "CIDR Expand",
+            description: "Show network/broadcast/mask/host range for a CIDR. Arg: 'a.b.c.d/n'.",
+            category: PluginCategory::Utility,
+        }
+    }
+    fn run(&self, _state: &AppState, arg: Option<&str>) -> PluginOutput {
+        let Some(c) = arg.and_then(crate::pwn::netutil::cidr) else {
+            return PluginOutput::default().line("[!] usage: cidr <a.b.c.d/n>");
+        };
+        use crate::pwn::netutil::fmt_ipv4;
+        let mut out = PluginOutput::default()
+            .line(format!("network:   {}/{}", fmt_ipv4(c.network), c.prefix))
+            .line(format!("netmask:   {}", fmt_ipv4(c.netmask)))
+            .line(format!("broadcast: {}", fmt_ipv4(c.broadcast)))
+            .line(format!("hosts:     {} - {}  ({} usable)", fmt_ipv4(c.first_host), fmt_ipv4(c.last_host), c.usable_hosts));
+        let sample = crate::pwn::netutil::hosts(&c, 16);
+        if !sample.is_empty() {
+            out = out.line(format!("first {}: {}", sample.len(), sample.join(", ")));
+        }
+        out
+    }
+}
+
+pub struct XorEncodePlugin;
+impl Plugin for XorEncodePlugin {
+    fn meta(&self) -> PluginMeta {
+        PluginMeta {
+            id: "xor-encode",
+            name: "XOR Encode Memory Window",
+            description: "XOR the current memory window with a key. Arg: key (0xhex or ascii).",
+            category: PluginCategory::Deobfuscation,
+        }
+    }
+    fn run(&self, state: &AppState, arg: Option<&str>) -> PluginOutput {
+        let Some(key_arg) = arg.map(str::trim).filter(|s| !s.is_empty()) else {
+            return PluginOutput::default().line("[!] usage: xor-encode <key>");
+        };
+        if state.memory_bytes.is_empty() {
+            return PluginOutput::default().line("[!] memory window empty");
+        }
+        let key: Vec<u8> = key_arg.strip_prefix("0x").and_then(|h| hex::decode(h).ok())
+            .unwrap_or_else(|| key_arg.as_bytes().to_vec());
+        let enc = crate::pwn::xor::xor(&state.memory_bytes, &key);
+        let hexs: String = enc.iter().take(256).map(|b| format!("{b:02x}")).collect();
+        PluginOutput::default()
+            .line(format!("xored {} bytes with {}-byte key", enc.len(), key.len()))
+            .line(hexs)
+    }
+}
+
+pub struct NopSledPlugin;
+impl Plugin for NopSledPlugin {
+    fn meta(&self) -> PluginMeta {
+        PluginMeta {
+            id: "nop-sled",
+            name: "NOP Sled",
+            description: "Generate an architecture-appropriate NOP sled. Arg: length in bytes.",
+            category: PluginCategory::Pwn,
+        }
+    }
+    fn run(&self, state: &AppState, arg: Option<&str>) -> PluginOutput {
+        use crate::target::arch::Architecture;
+        let len = arg.and_then(parse_num_usize).unwrap_or(64);
+        let nop: &[u8] = match arch_of(state) {
+            Architecture::AArch64 => &[0x1f, 0x20, 0x03, 0xd5], // nop (LE)
+            Architecture::Arm => &[0x00, 0xf0, 0x20, 0xe3],     // nop (ARM)
+            _ => &[0x90],                                        // x86 nop
+        };
+        let sled: Vec<u8> = nop.iter().cloned().cycle().take(len).collect();
+        let hexs: String = sled.iter().map(|b| format!("{b:02x}")).collect();
+        PluginOutput::default().line(format!("{len}-byte NOP sled:")).line(hexs)
+    }
+}
+
+pub struct XrefPlugin;
+impl Plugin for XrefPlugin {
+    fn meta(&self) -> PluginMeta {
+        PluginMeta {
+            id: "xref",
+            name: "Find Code XRefs",
+            description: "Find calls/jumps that target an address. Arg: address (hex).",
+            category: PluginCategory::Rev,
+        }
+    }
+    fn run(&self, state: &AppState, arg: Option<&str>) -> PluginOutput {
+        let Some(target) = arg.and_then(parse_num) else {
+            return PluginOutput::default().line("[!] usage: xref <addr>");
+        };
+        let Some((bytes, base, arch)) = first_exec_section(state) else {
+            return PluginOutput::default().line("[!] no executable section / binary loaded");
+        };
+        let all = match crate::analysis::xref::find_all(&bytes, base, arch) {
+            Ok(v) => v,
+            Err(e) => return PluginOutput::default().line(format!("[!] {e}")),
+        };
+        let hits = crate::analysis::xref::to_address(&all, target);
+        let mut out = PluginOutput::default().line(format!("{} xref(s) to 0x{target:x}:", hits.len()));
+        for x in hits.iter().take(100) {
+            out = out.line(format!("  0x{:016x}: {}", x.from, x.text));
+        }
+        out
+    }
+}
+
+pub struct CfgPlugin;
+impl Plugin for CfgPlugin {
+    fn meta(&self) -> PluginMeta {
+        PluginMeta {
+            id: "cfg",
+            name: "Control-Flow Graph",
+            description: "Print basic blocks + edges of the function at an address. Arg: address (hex).",
+            category: PluginCategory::Rev,
+        }
+    }
+    fn run(&self, state: &AppState, arg: Option<&str>) -> PluginOutput {
+        let Some(addr) = arg.and_then(parse_num) else {
+            return PluginOutput::default().line("[!] usage: cfg <addr>");
+        };
+        let Some((bytes, base, arch)) = first_exec_section(state) else {
+            return PluginOutput::default().line("[!] no executable section / binary loaded");
+        };
+        let all = match crate::pwn::asm::disasm_all(arch, base, &bytes) {
+            Ok(v) => v,
+            Err(e) => return PluginOutput::default().line(format!("[!] {e}")),
+        };
+        // Take instructions from `addr` up to (and including) the first ret.
+        let mut func: Vec<_> = Vec::new();
+        for ins in all.into_iter().filter(|i| i.address >= addr) {
+            let is_ret = crate::analysis::flow::classify(&ins.mnemonic) == crate::analysis::flow::FlowKind::Return;
+            func.push(ins);
+            if is_ret || func.len() >= 512 { break; }
+        }
+        if func.is_empty() {
+            return PluginOutput::default().line("[!] no instructions at that address");
+        }
+        let cfg = crate::analysis::cfg::build_cfg(&func);
+        let mut out = PluginOutput::default().line(format!("CFG @ 0x{addr:x}: {} block(s)", cfg.blocks.len()));
+        for b in &cfg.blocks {
+            let succ: Vec<String> = b.succ.iter().map(|(t, k)| format!("0x{:x}({:?})", t, k)).collect();
+            out = out.line(format!("  block 0x{:x}-0x{:x} ({} insn) -> {}", b.start, b.end, b.insns.len(),
+                if succ.is_empty() { "exit".into() } else { succ.join(", ") }));
+        }
+        out
+    }
+}
+
+pub struct CallGraphPlugin;
+impl Plugin for CallGraphPlugin {
+    fn meta(&self) -> PluginMeta {
+        PluginMeta {
+            id: "callgraph",
+            name: "Call Graph",
+            description: "List call edges (caller -> callee) in the first executable section.",
+            category: PluginCategory::Rev,
+        }
+    }
+    fn run(&self, state: &AppState, arg: Option<&str>) -> PluginOutput {
+        let limit = arg.and_then(parse_num_usize).unwrap_or(100);
+        let Some((bytes, base, arch)) = first_exec_section(state) else {
+            return PluginOutput::default().line("[!] no executable section / binary loaded");
+        };
+        let all = match crate::analysis::xref::find_all(&bytes, base, arch) {
+            Ok(v) => v,
+            Err(e) => return PluginOutput::default().line(format!("[!] {e}")),
+        };
+        let calls: Vec<_> = all.iter().filter(|x| x.kind == crate::analysis::xref::XrefKind::Call).collect();
+        let mut out = PluginOutput::default().line(format!("{} call edge(s):", calls.len()));
+        for x in calls.iter().take(limit) {
+            let sym = state.binary.as_ref()
+                .and_then(|b| b.symbols.iter().find(|s| s.address == x.to))
+                .map(|s| format!("  ; {}", s.name)).unwrap_or_default();
+            out = out.line(format!("  0x{:016x} -> 0x{:016x}{}", x.from, x.to, sym));
+        }
+        out
+    }
+}
+
 // ----------------------------------------------------------------- helpers --
 
 fn parse_num(s: &str) -> Option<u64> {

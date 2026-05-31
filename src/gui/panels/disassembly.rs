@@ -1,11 +1,12 @@
 use crate::analysis::disasm::Disassembler;
+use crate::analysis::flow::{self, FlowKind};
 use crate::gui::actions::Action;
 use crate::gui::state::{AppState, DebugCommand};
 use crate::gui::theme::color;
 use crate::gui::widgets::address::parse_hex;
 use crate::gui::widgets::disasm_syntax;
 use crate::target::arch::Architecture;
-use egui::{RichText, Sense, Ui};
+use egui::{pos2, RichText, Sense, Stroke, Ui};
 
 pub fn show(ui: &mut Ui, state: &mut AppState, actions: &mut Vec<Action>) {
     ui.horizontal(|ui| {
@@ -33,7 +34,16 @@ pub fn show(ui: &mut Ui, state: &mut AppState, actions: &mut Vec<Action>) {
     let bp_addrs: std::collections::HashSet<u64> =
         state.breakpoints.iter().filter(|b| b.enabled).map(|b| b.address).collect();
 
+    // Branch-arrow layout (IDA/Ghidra-style gutter showing where jumps go).
+    let conv: Vec<crate::pwn::asm::DisasmInsn> = insns.iter().map(|i| crate::pwn::asm::DisasmInsn {
+        address: i.address, bytes: i.bytes.clone(), mnemonic: i.mnemonic.clone(), operands: i.op_str.clone(),
+    }).collect();
+    let (arrows, lanes) = flow::compute_arrows(&conv);
+    let gutter_w = if lanes > 0 { lanes as f32 * 7.0 + 8.0 } else { 0.0 };
+
     egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
+        let gutter_x0 = ui.min_rect().left();
+        let mut row_y: Vec<(u64, f32)> = Vec::with_capacity(insns.len());
         for ins in &insns {
             let is_pc = ins.address == pc;
             let is_bp = bp_addrs.contains(&ins.address);
@@ -41,8 +51,9 @@ pub fn show(ui: &mut Ui, state: &mut AppState, actions: &mut Vec<Action>) {
                 else if is_bp { color::BREAKPOINT }
                 else { egui::Color32::TRANSPARENT };
             let frame = egui::Frame::none().fill(row_bg).inner_margin(egui::Margin::symmetric(2.0, 1.0));
-            frame.show(ui, |ui| {
+            let fr = frame.show(ui, |ui| {
                 let resp = ui.horizontal(|ui| {
+                    if gutter_w > 0.0 { ui.add_space(gutter_w); }
                     let marker = if is_pc { "\u{27A4}" } else if is_bp { "\u{2B24}" } else { " " };
                     ui.monospace(RichText::new(marker).color(if is_bp { egui::Color32::from_rgb(0xff, 0x55, 0x55) } else { color::ACCENT }));
                     ui.monospace(RichText::new(format!("{:016x}", ins.address)).color(color::ADDRESS));
@@ -74,6 +85,24 @@ pub fn show(ui: &mut Ui, state: &mut AppState, actions: &mut Vec<Action>) {
                     if ui.button("Run To Here").clicked() { actions.push(Action::RunToAddress(ins.address)); ui.close_menu(); }
                     if ui.button("Jump to IP").clicked() { actions.push(Action::JumpToIp); ui.close_menu(); }
                     if ui.button("Override IP").clicked() { actions.push(Action::OverrideIpDialog); ui.close_menu(); }
+                    ui.separator();
+                    if ui.button("Find XRefs to here").clicked() {
+                        actions.push(Action::ConsoleCommand(format!("xref 0x{:x}", ins.address)));
+                        ui.close_menu();
+                    }
+                    if ui.button("Control-flow graph from here").clicked() {
+                        actions.push(Action::ConsoleCommand(format!("cfg 0x{:x}", ins.address)));
+                        ui.close_menu();
+                    }
+                    if let Some(t) = flow::branch_target(&crate::pwn::asm::DisasmInsn {
+                        address: ins.address, bytes: ins.bytes.clone(), mnemonic: ins.mnemonic.clone(), operands: ins.op_str.clone(),
+                    }) {
+                        if ui.button(format!("Follow branch \u{2192} 0x{t:x}")).clicked() {
+                            actions.push(Action::NavigateTo(t));
+                            ui.close_menu();
+                        }
+                    }
+                    ui.separator();
                     if ui.button("Copy Address").clicked() {
                         ui.output_mut(|o| o.copied_text = format!("0x{:x}", ins.address));
                         ui.close_menu();
@@ -84,14 +113,37 @@ pub fn show(ui: &mut Ui, state: &mut AppState, actions: &mut Vec<Action>) {
                     }
                 });
             });
+            row_y.push((ins.address, fr.response.rect.center().y));
         }
         if insns.is_empty() {
             ui.label(RichText::new("(no bytes available - launch a process or load a binary)").color(color::MUTED));
         }
+
+        // Paint the branch arrows into the reserved gutter.
+        if gutter_w > 0.0 && !arrows.is_empty() {
+            let painter = ui.painter();
+            let y_of = |addr: u64| row_y.iter().find(|(a, _)| *a == addr).map(|(_, y)| *y);
+            let right_x = gutter_x0 + gutter_w - 3.0;
+            for arr in &arrows {
+                let (Some(y0), Some(y1)) = (y_of(arr.from), y_of(arr.to)) else { continue };
+                let lane_x = gutter_x0 + 3.0 + arr.lane as f32 * 7.0;
+                let col = match arr.kind {
+                    FlowKind::CondJump => color::IMMEDIATE,
+                    _ => color::ACCENT,
+                };
+                let stroke = Stroke::new(1.3, col);
+                painter.line_segment([pos2(right_x, y0), pos2(lane_x, y0)], stroke);
+                painter.line_segment([pos2(lane_x, y0), pos2(lane_x, y1)], stroke);
+                painter.line_segment([pos2(lane_x, y1), pos2(right_x, y1)], stroke);
+                // Arrowhead at the target, pointing right into the instruction.
+                painter.line_segment([pos2(right_x, y1), pos2(right_x - 4.0, y1 - 3.0)], stroke);
+                painter.line_segment([pos2(right_x, y1), pos2(right_x - 4.0, y1 + 3.0)], stroke);
+            }
+        }
     });
 }
 
-fn read_bytes_for_disasm(state: &AppState, address: u64, len: usize) -> Vec<u8> {
+pub(crate) fn read_bytes_for_disasm(state: &AppState, address: u64, len: usize) -> Vec<u8> {
     // First try live process via memory cache from latest event - we don't keep one,
     // so fall back to binary file content based on RVA.
     if let Some(b) = &state.binary {

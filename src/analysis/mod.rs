@@ -1,11 +1,14 @@
 pub mod auto;
+pub mod cfg;
 pub mod checksec;
 pub mod crypto;
 pub mod deobfuscate;
 pub mod disasm;
 pub mod entropy;
+pub mod flow;
 pub mod hints;
 pub mod iocs;
 pub mod rop;
 pub mod stack;
 pub mod symbols;
+pub mod xref;

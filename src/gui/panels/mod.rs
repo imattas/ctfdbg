@@ -3,6 +3,7 @@ pub mod debugger_console;
 pub mod debugger_info;
 pub mod disassembly;
 pub mod functions;
+pub mod graph;
 pub mod logs;
 pub mod memory;
 pub mod modules;
