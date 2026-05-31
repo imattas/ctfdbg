@@ -9,10 +9,8 @@ use crate::plugins::PluginCategory;
 
 pub fn show(ui: &mut Ui, state: &mut AppState, actions: &mut Vec<Action>) {
     ui.horizontal(|ui| {
-        ui.heading("Plugins");
-        ui.separator();
         ui.label(RichText::new(
-            "Built-in commands. Each plugin runs against the current debugger state."
+            "Built-in tools. Each runs against the current debugger state; output goes to the Debugger Console."
         ).color(color::MUTED).small());
     });
     ui.separator();
