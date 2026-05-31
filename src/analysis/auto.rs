@@ -80,9 +80,9 @@ pub fn analyze(info: &BinaryInfo, bytes: &[u8]) -> AutoAnalysis {
 ///   2. Symbols flagged `is_function`.
 ///   3. Exports (for libraries / DLLs).
 ///   4. x86/x64 prologue pattern scan over executable sections:
-///         55 8B EC                ; push ebp / mov ebp, esp   (i386)
-///         55 48 89 E5             ; push rbp / mov rbp, rsp   (x86_64)
-///         48 83 EC ??             ; sub rsp, imm8             (x86_64 leaf)
+///      - `55 8B EC`     push ebp / mov ebp, esp   (i386)
+///      - `55 48 89 E5`  push rbp / mov rbp, rsp   (x86_64)
+///      - `48 83 EC ??`  sub rsp, imm8             (x86_64 leaf)
 fn function_candidates(info: &BinaryInfo, bytes: &[u8]) -> Vec<AnalyzedFunction> {
     let mut seen: BTreeSet<u64> = BTreeSet::new();
     let mut out: Vec<AnalyzedFunction> = Vec::new();

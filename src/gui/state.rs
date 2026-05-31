@@ -37,6 +37,7 @@ pub enum DebugCommand {
     StepReturn,
     RunToAddress(u64),
     SetBreakpoint(u64),
+    SetHardwareBreakpoint(u64, crate::debugger::breakpoint::BreakpointKind, u8),
     RemoveBreakpoint(u64),
     EnableBreakpoint(u64, bool),
     SetCondition(u64, Option<String>),
@@ -298,7 +299,15 @@ fn worker_main(cfg: DebugConfig, cmd_rx: Receiver<DebugCommand>, upd_tx: Sender<
                 DebugCommand::Detach => { backend.detach()?; send_state(backend.as_ref(), &upd_tx); }
                 DebugCommand::Kill => { backend.kill()?; send_state(backend.as_ref(), &upd_tx); }
                 DebugCommand::Continue => {
-                    let ev = backend.continue_exec()?;
+                    // Honour conditional breakpoints: if we stop at a breakpoint
+                    // whose condition evaluates to false, resume automatically.
+                    let mut ev = backend.continue_exec()?;
+                    while let DebuggerEvent::BreakpointHit { id, .. } = ev {
+                        if breakpoint_condition_met(backend.as_ref(), id) {
+                            break;
+                        }
+                        ev = backend.continue_exec()?;
+                    }
                     let _ = upd_tx.send(BackendUpdate::Event(ev));
                     publish_after_stop(&mut backend, &upd_tx);
                 }
@@ -328,6 +337,7 @@ fn worker_main(cfg: DebugConfig, cmd_rx: Receiver<DebugCommand>, upd_tx: Sender<
                     publish_after_stop(&mut backend, &upd_tx);
                 }
                 DebugCommand::SetBreakpoint(a) => { backend.set_breakpoint(a)?; let _ = upd_tx.send(BackendUpdate::Breakpoints(backend.list_breakpoints())); }
+                DebugCommand::SetHardwareBreakpoint(a, kind, size) => { backend.set_hardware_breakpoint(a, kind, size)?; let _ = upd_tx.send(BackendUpdate::Breakpoints(backend.list_breakpoints())); }
                 DebugCommand::RemoveBreakpoint(id) => { backend.remove_breakpoint(crate::debugger::breakpoint::BreakpointId(id))?; let _ = upd_tx.send(BackendUpdate::Breakpoints(backend.list_breakpoints())); }
                 DebugCommand::EnableBreakpoint(id, e) => { backend.enable_breakpoint(crate::debugger::breakpoint::BreakpointId(id), e)?; let _ = upd_tx.send(BackendUpdate::Breakpoints(backend.list_breakpoints())); }
                 DebugCommand::SetCondition(id, c) => { backend.set_breakpoint_condition(crate::debugger::breakpoint::BreakpointId(id), c)?; let _ = upd_tx.send(BackendUpdate::Breakpoints(backend.list_breakpoints())); }
@@ -345,6 +355,30 @@ fn worker_main(cfg: DebugConfig, cmd_rx: Receiver<DebugCommand>, upd_tx: Sender<
         if let Err(e) = res {
             let _ = upd_tx.send(BackendUpdate::Error(e.to_string()));
         }
+    }
+}
+
+/// Adapter so breakpoint-condition expressions can dereference target memory.
+struct BackendMemory<'a>(&'a (dyn DebugBackend + Send));
+impl crate::debugger::expressions::MemoryReader for BackendMemory<'_> {
+    fn read(&self, address: u64, size: usize) -> DbgResult<Vec<u8>> {
+        self.0.read_memory(address, size)
+    }
+}
+
+/// Evaluate a breakpoint's condition (if any) against the current state.
+/// Returns `true` (stop) when there is no condition, the condition can't be
+/// evaluated, or it evaluates to a non-zero value.
+fn breakpoint_condition_met(backend: &(dyn DebugBackend + Send), id: u64) -> bool {
+    let bps = backend.list_breakpoints();
+    let Some(bp) = bps.iter().find(|b| b.id.0 == id) else { return true };
+    let Some(cond) = bp.condition.as_ref().filter(|c| !c.trim().is_empty()) else { return true };
+    let Ok(expr) = crate::debugger::expressions::parse(cond) else { return true };
+    let Ok(regs) = backend.read_registers(None) else { return true };
+    let ptr = regs.architecture.pointer_size();
+    match crate::debugger::expressions::evaluate(&expr, &regs, &BackendMemory(backend), ptr) {
+        Ok(v) => v != 0,
+        Err(_) => true,
     }
 }
 

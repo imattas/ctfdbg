@@ -81,6 +81,45 @@ mod linux_x86_64 {
     }
 
     #[test]
+    fn hardware_execute_breakpoint() {
+        use ctfdbg::debugger::breakpoint::BreakpointKind;
+        if !Path::new("/bin/true").exists() {
+            return;
+        }
+        let mut be = LinuxPtraceBackend::new();
+        be.launch(&target("/bin/true")).unwrap();
+        let rip = be.read_registers(None).unwrap().pc().unwrap();
+
+        // Program a debug register (DR0) to trap on execute at the entry PC.
+        let id = be
+            .set_hardware_breakpoint(rip, BreakpointKind::HardwareExecute, 1)
+            .expect("set hardware breakpoint");
+        match be.continue_exec().expect("continue") {
+            DebuggerEvent::BreakpointHit { address, id: hit, .. } => {
+                assert_eq!(address, rip);
+                assert_eq!(hit, id.0);
+            }
+            other => panic!("expected hardware BreakpointHit, got {other:?}"),
+        }
+
+        // Removing it clears DR7; the process then runs to exit (proving the
+        // resume-flag handling stops it re-triggering forever).
+        be.remove_breakpoint(id).unwrap();
+        let mut exited = false;
+        for _ in 0..100_000 {
+            match be.continue_exec() {
+                Ok(DebuggerEvent::ProcessExited { .. }) => {
+                    exited = true;
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+        assert!(exited, "process should run to exit after hardware breakpoint removed");
+    }
+
+    #[test]
     fn register_write_round_trips() {
         if !Path::new("/bin/true").exists() {
             return;

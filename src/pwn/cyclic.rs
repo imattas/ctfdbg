@@ -20,7 +20,7 @@ pub fn cyclic_with(n: usize, alphabet: &[u8], subseq_len: usize) -> Vec<u8> {
     fn db(t: usize, p: usize, k: usize, n: usize, a: &mut [usize], seq: &mut Vec<usize>, limit: usize) {
         if seq.len() >= limit { return; }
         if t > n {
-            if n % p == 0 {
+            if n.is_multiple_of(p) {
                 for &x in &a[1..=p] {
                     if seq.len() >= limit { return; }
                     seq.push(x);

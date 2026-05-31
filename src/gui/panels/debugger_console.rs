@@ -162,7 +162,9 @@ pub fn execute(state: &mut AppState, line: &str) {
                 if let Ok(a) = parse_u64(&addr) { state.disasm_address = a; }
             }
             Command::Search(pat) => {
-                state.console_output.push(format!("(search '{pat}' across loaded binary not yet implemented)"));
+                for line in search_loaded(state, &pat) {
+                    state.console_output.push(line);
+                }
             }
             Command::Cyclic(n) => {
                 let p = crate::pwn::cyclic::cyclic(n);
@@ -197,12 +199,123 @@ pub fn execute(state: &mut AppState, line: &str) {
                 }
             }
             Command::Got | Command::Plt => {
-                state.console_output.push("GOT/PLT viewing only meaningful for ELF; not implemented in this build.".into());
+                for line in show_got_plt(state) {
+                    state.console_output.push(line);
+                }
             }
             Command::Quit => std::process::exit(0),
             Command::Comment(_) => {}
         },
     }
+}
+
+/// Interpret a search pattern as raw hex (optionally `0x`-prefixed) when it is
+/// all hex digits of even length, otherwise as ASCII bytes.
+fn parse_search_pattern(pat: &str) -> Vec<u8> {
+    let t = pat.trim();
+    let hexcand = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")).unwrap_or(t);
+    if !hexcand.is_empty() && hexcand.len().is_multiple_of(2) && hexcand.bytes().all(|b| b.is_ascii_hexdigit()) {
+        if let Ok(v) = hex::decode(hexcand) {
+            return v;
+        }
+    }
+    t.as_bytes().to_vec()
+}
+
+/// Search the loaded binary image for a byte/string pattern.
+fn search_loaded(state: &AppState, pat: &str) -> Vec<String> {
+    let Some(bytes) = state.binary_bytes.as_ref() else {
+        return vec!["[!] no binary loaded".into()];
+    };
+    let needle = parse_search_pattern(pat);
+    if needle.is_empty() {
+        return vec!["[!] empty search pattern".into()];
+    }
+    let mut hits = Vec::new();
+    let mut count = 0usize;
+    let mut i = 0usize;
+    while i + needle.len() <= bytes.len() {
+        if &bytes[i..i + needle.len()] == needle.as_slice() {
+            let va = state.binary.as_ref().and_then(|info| {
+                info.sections
+                    .iter()
+                    .find(|s| {
+                        let off = s.file_offset as usize;
+                        i >= off && (i as u64) < s.file_offset + s.file_size
+                    })
+                    .map(|s| s.virtual_address + (i as u64 - s.file_offset))
+            });
+            match va {
+                Some(v) => hits.push(format!("  file 0x{i:08x}   vaddr 0x{v:x}")),
+                None => hits.push(format!("  file 0x{i:08x}")),
+            }
+            count += 1;
+            if count >= 200 {
+                hits.push("  ... (truncated at 200)".into());
+                break;
+            }
+            i += needle.len().max(1);
+        } else {
+            i += 1;
+        }
+    }
+    if hits.is_empty() {
+        return vec![format!("no matches for {:02x?}", needle)];
+    }
+    hits.insert(0, format!("{count} match(es):"));
+    hits
+}
+
+/// Show GOT/PLT sections (ELF) or the import table (PE).
+fn show_got_plt(state: &AppState) -> Vec<String> {
+    use crate::target::format::FileFormat;
+    let Some(info) = state.binary.as_ref() else {
+        return vec!["[!] no binary loaded".into()];
+    };
+    if info.format != FileFormat::Elf {
+        if info.imports.is_empty() {
+            return vec!["GOT/PLT is ELF-specific; this binary exposes no import table".into()];
+        }
+        let mut out = vec!["Imports (IAT):".to_string()];
+        for imp in info.imports.iter().take(300) {
+            out.push(format!("  0x{:x}  {}!{}", imp.address, imp.library, imp.name));
+        }
+        return out;
+    }
+
+    let ptr = info.architecture.pointer_size().max(1);
+    let mut out = Vec::new();
+    for secname in [".plt", ".plt.sec", ".plt.got", ".got", ".got.plt"] {
+        let Some(s) = info.sections.iter().find(|s| s.name == secname) else { continue };
+        out.push(format!(
+            "{}: 0x{:x}-0x{:x} ({} bytes)",
+            secname,
+            s.virtual_address,
+            s.virtual_address + s.virtual_size,
+            s.virtual_size
+        ));
+        if secname.starts_with(".got") {
+            if let Some(bytes) = state.binary_bytes.as_ref() {
+                let start = s.file_offset as usize;
+                let end = ((s.file_offset + s.file_size) as usize).min(bytes.len());
+                let mut off = start;
+                let mut idx = 0;
+                while off + ptr <= end && idx < 64 {
+                    let mut buf = [0u8; 8];
+                    buf[..ptr].copy_from_slice(&bytes[off..off + ptr]);
+                    let val = u64::from_le_bytes(buf);
+                    let va = s.virtual_address + (off - start) as u64;
+                    out.push(format!("  [0x{va:x}] = 0x{val:x}"));
+                    off += ptr;
+                    idx += 1;
+                }
+            }
+        }
+    }
+    if out.is_empty() {
+        out.push("no .got/.plt sections present in this binary".into());
+    }
+    out
 }
 
 /// Try interpreting `line` as `<plugin-id> [optional argument]` and

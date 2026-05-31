@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use libc::pid_t;
 
 use crate::debugger::backend::{DebugBackend, DebugTarget};
-use crate::debugger::breakpoint::{BreakpointId, BreakpointInfo};
+use crate::debugger::breakpoint::{BreakpointId, BreakpointInfo, BreakpointKind};
 use crate::debugger::events::DebuggerEvent;
 use crate::debugger::modules::DebugModule;
 use crate::debugger::registers::RegisterFile;
@@ -40,6 +40,13 @@ pub struct LinuxPtraceBackend {
     /// Signal to deliver to the tracee on the next resume (0 = none).
     pending_signal: i32,
     modules: Vec<DebugModule>,
+    /// Hardware debug-register slots (x86 DR0–DR3): (breakpoint id, address).
+    #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+    hw_slots: [Option<(BreakpointId, u64)>; 4],
+    /// Set the x86 resume flag on the next continue so a hardware execute
+    /// breakpoint at the current PC does not immediately re-trigger.
+    #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+    hw_resume_rf: bool,
 }
 
 impl LinuxPtraceBackend {
@@ -56,6 +63,10 @@ impl LinuxPtraceBackend {
             pending_reinsert: None,
             pending_signal: 0,
             modules: vec![],
+            #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+            hw_slots: [None; 4],
+            #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+            hw_resume_rf: false,
         }
     }
 
@@ -113,6 +124,11 @@ impl LinuxPtraceBackend {
                     }
                     Ok(DebuggerEvent::BreakpointHit { id: id.0, thread_id: pid as u32, address: cand })
                 } else {
+                    // A hardware debug register may have fired instead.
+                    #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+                    if let Some(ev) = self.check_hw_hit(pid, pc) {
+                        return Ok(ev);
+                    }
                     self.last_stop_addr = pc;
                     if was_step {
                         Ok(DebuggerEvent::SingleStep { thread_id: pid as u32, address: pc })
@@ -149,6 +165,16 @@ impl LinuxPtraceBackend {
     fn resume(&mut self, step: bool) -> DbgResult<DebuggerEvent> {
         let pid = self.require_running()?;
         let sig = std::mem::take(&mut self.pending_signal);
+
+        // After a hardware execute breakpoint, set the x86 resume flag so we
+        // do not immediately re-trap on the same instruction.
+        #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+        if std::mem::take(&mut self.hw_resume_rf) {
+            if let Ok(mut regs) = ptrace::get_regs(pid) {
+                arch::set_resume_flag(&mut regs);
+                let _ = ptrace::set_regs(pid, &regs);
+            }
+        }
 
         // If we are sitting on a breakpoint whose original instruction we
         // restored, step over it and re-arm the breakpoint first.
@@ -199,6 +225,74 @@ impl LinuxPtraceBackend {
                 self.modules = m;
             }
         }
+    }
+
+    /// Program an x86 debug register (DR0–DR3 + DR7) for a hardware breakpoint.
+    #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+    fn set_hw_x86(&mut self, address: u64, kind: BreakpointKind, size: u8) -> DbgResult<BreakpointId> {
+        let pid = self.require_running()?;
+        let slot = self
+            .hw_slots
+            .iter()
+            .position(|s| s.is_none())
+            .ok_or_else(|| DbgError::Breakpoint("all 4 hardware debug-register slots are in use".into()))?;
+        let (rw, len) = match kind {
+            BreakpointKind::HardwareExecute => (0b00u64, 0b00u64),
+            BreakpointKind::HardwareWrite => (0b01, len_bits(size)),
+            BreakpointKind::HardwareRead | BreakpointKind::HardwareAccess => (0b11, len_bits(size)),
+            BreakpointKind::Software => return self.set_breakpoint(address),
+        };
+        ptrace::poke_user(pid, ptrace::debugreg_offset(slot), address)?;
+        let mut dr7 = ptrace::peek_user(pid, ptrace::debugreg_offset(7))?;
+        dr7 |= 1u64 << (slot * 2); // local enable
+        dr7 &= !(0b1111u64 << (16 + slot * 4)); // clear this slot's RW+LEN
+        dr7 |= (rw << (16 + slot * 4)) | (len << (18 + slot * 4));
+        ptrace::poke_user(pid, ptrace::debugreg_offset(7), dr7)?;
+
+        let id = self.alloc_bp_id();
+        let label = self
+            .modules
+            .iter()
+            .find(|m| m.contains(address))
+            .map(|m| format!("{}+0x{:x}", m.name, address - m.base))
+            .unwrap_or_else(|| format!("0x{address:x}"));
+        let mut bp = BreakpointInfo::new_software(id, address, label);
+        bp.kind = kind;
+        bp.size = size;
+        self.breakpoints.insert(id, bp);
+        self.hw_slots[slot] = Some((id, address));
+        Ok(id)
+    }
+
+    /// If a hardware debug register fired (DR6), map it to a breakpoint event.
+    #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+    fn check_hw_hit(&mut self, pid: pid_t, _pc: u64) -> Option<DebuggerEvent> {
+        let dr6 = ptrace::peek_user(pid, ptrace::debugreg_offset(6)).unwrap_or(0);
+        if dr6 & 0xf == 0 {
+            return None;
+        }
+        let slot = (dr6 & 0xf).trailing_zeros() as usize;
+        let _ = ptrace::poke_user(pid, ptrace::debugreg_offset(6), 0); // clear status
+        if let Some((id, addr)) = self.hw_slots.get(slot).copied().flatten() {
+            self.hw_resume_rf = true;
+            self.last_stop_addr = addr;
+            if let Some(bp) = self.breakpoints.get_mut(&id) {
+                bp.hit_count += 1;
+            }
+            return Some(DebuggerEvent::BreakpointHit { id: id.0, thread_id: pid as u32, address: addr });
+        }
+        None
+    }
+}
+
+/// x86 DR7 length encoding for a watchpoint size in bytes.
+#[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+fn len_bits(size: u8) -> u64 {
+    match size {
+        1 => 0b00,
+        2 => 0b01,
+        8 => 0b10,
+        _ => 0b11, // 4 bytes
     }
 }
 
@@ -421,9 +515,33 @@ impl DebugBackend for LinuxPtraceBackend {
         Ok(id)
     }
 
+    fn set_hardware_breakpoint(&mut self, address: u64, kind: BreakpointKind, size: u8) -> DbgResult<BreakpointId> {
+        #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+        {
+            self.set_hw_x86(address, kind, size)
+        }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "x86")))]
+        {
+            // No debug-register marshalling on this arch yet: an execute
+            // hardware breakpoint behaves identically to a software one.
+            let _ = (kind, size);
+            self.set_breakpoint(address)
+        }
+    }
+
     fn remove_breakpoint(&mut self, id: BreakpointId) -> DbgResult<()> {
         if let Some(bp) = self.breakpoints.remove(&id) {
             self.bp_by_addr.remove(&bp.address);
+            #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+            if let Some(slot) = self.hw_slots.iter().position(|s| matches!(s, Some((sid, _)) if *sid == id)) {
+                if let Some(pid) = self.pid {
+                    if let Ok(mut dr7) = ptrace::peek_user(pid, ptrace::debugreg_offset(7)) {
+                        dr7 &= !(1u64 << (slot * 2));
+                        let _ = ptrace::poke_user(pid, ptrace::debugreg_offset(7), dr7);
+                    }
+                }
+                self.hw_slots[slot] = None;
+            }
             if let (Some(pid), Some(orig)) = (self.pid, self.orig.remove(&bp.address)) {
                 if bp.enabled {
                     let _ = ptrace::write_mem(pid, bp.address, &orig);
@@ -598,6 +716,8 @@ mod arch {
     pub fn set_pc(r: &mut libc::user_regs_struct, v: u64) { r.rip = v; }
     /// On x86 `int3` advances RIP one byte past the breakpoint.
     pub fn trap_bp_addr(pc: u64) -> u64 { pc.wrapping_sub(1) }
+    /// Set EFLAGS.RF so the next instruction does not re-trigger an exec bp.
+    pub fn set_resume_flag(r: &mut libc::user_regs_struct) { r.eflags |= 0x1_0000; }
 
     pub fn return_address(pid: libc::pid_t, r: &libc::user_regs_struct) -> DbgResult<u64> {
         let b = ptrace::read_mem(pid, r.rsp, 8)?;
@@ -642,6 +762,7 @@ mod arch {
     pub fn fp(r: &libc::user_regs_struct) -> u64 { r.ebp as u64 }
     pub fn set_pc(r: &mut libc::user_regs_struct, v: u64) { r.eip = v as _; }
     pub fn trap_bp_addr(pc: u64) -> u64 { pc.wrapping_sub(1) }
+    pub fn set_resume_flag(r: &mut libc::user_regs_struct) { r.eflags |= 0x1_0000; }
 
     pub fn return_address(pid: libc::pid_t, r: &libc::user_regs_struct) -> DbgResult<u64> {
         let b = ptrace::read_mem(pid, r.esp as u64, 4)?;

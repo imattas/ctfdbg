@@ -31,7 +31,7 @@ impl App {
         match u {
             BackendUpdate::State(s) => {
                 self.state.state = s;
-                self.state.status_message = format!("{}", s.label());
+                self.state.status_message = s.label().to_string();
             }
             BackendUpdate::Pid(p) => self.state.pid = p,
             BackendUpdate::Event(ev) => {
@@ -128,6 +128,9 @@ impl App {
                 } else {
                     self.state.send(DebugCommand::SetBreakpoint(addr));
                 }
+            }
+            Action::SetHardwareBreakpoint { address, kind, size } => {
+                self.state.send(DebugCommand::SetHardwareBreakpoint(address, kind, size));
             }
             Action::RunToAddress(a) => self.state.send(DebugCommand::RunToAddress(a)),
             Action::NavigateTo(a) => {

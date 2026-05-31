@@ -1,6 +1,6 @@
 //! Backend trait + a fallback Unsupported impl.
 
-use crate::debugger::breakpoint::{BreakpointId, BreakpointInfo};
+use crate::debugger::breakpoint::{BreakpointId, BreakpointInfo, BreakpointKind};
 use crate::debugger::events::DebuggerEvent;
 use crate::debugger::modules::DebugModule;
 use crate::debugger::registers::RegisterFile;
@@ -51,6 +51,22 @@ pub trait DebugBackend {
     fn write_memory(&mut self, address: u64, data: &[u8]) -> DbgResult<()>;
 
     fn set_breakpoint(&mut self, address: u64) -> DbgResult<BreakpointId>;
+
+    /// Set a hardware breakpoint / watchpoint using the CPU debug registers.
+    ///
+    /// Backends with debug-register support (x86 via DR0–DR7) override this to
+    /// trap on execute / read / write / access. The default implementation
+    /// falls back to a software breakpoint at `address`, so the feature always
+    /// works (as an execute breakpoint) rather than reporting "unsupported".
+    fn set_hardware_breakpoint(
+        &mut self,
+        address: u64,
+        _kind: BreakpointKind,
+        _size: u8,
+    ) -> DbgResult<BreakpointId> {
+        self.set_breakpoint(address)
+    }
+
     fn remove_breakpoint(&mut self, id: BreakpointId) -> DbgResult<()>;
     fn enable_breakpoint(&mut self, id: BreakpointId, enabled: bool) -> DbgResult<()>;
     fn set_breakpoint_condition(&mut self, id: BreakpointId, condition: Option<String>) -> DbgResult<()>;

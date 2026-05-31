@@ -35,7 +35,7 @@ pub fn show(ui: &mut Ui, state: &mut AppState, _actions: &mut Vec<Action>) {
             for m in metas {
                 let name = m.name;
                 let val = state.registers.get(name).unwrap_or(0);
-                if state.hide_zero_registers && val == 0 && !filter.is_empty() == false { continue; }
+                if state.hide_zero_registers && val == 0 && filter.is_empty() { continue; }
                 if !filter.is_empty() && !name.to_ascii_lowercase().contains(&filter) { continue; }
                 let changed = prev.get(name).copied().unwrap_or(val) != val;
                 let was_edited = edited.get(name).copied().unwrap_or(0) != 0;

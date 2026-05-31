@@ -263,3 +263,31 @@ pub fn send_signal(pid: pid_t, sig: i32) {
     // SAFETY: kill with a pid we own.
     unsafe { libc::kill(pid, sig); }
 }
+
+// ---- x86 debug-register access (hardware breakpoints / watchpoints) --------
+
+/// Byte offset of debug register `n` within the `struct user` USER area.
+#[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+pub fn debugreg_offset(n: usize) -> usize {
+    std::mem::offset_of!(libc::user, u_debugreg) + n * std::mem::size_of::<usize>()
+}
+
+/// Read debug register `n` (`PTRACE_PEEKUSER`).
+#[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+pub fn peek_user(pid: pid_t, offset: usize) -> DbgResult<u64> {
+    clear_errno();
+    let v = raw(libc::PTRACE_PEEKUSER, pid, offset as *mut c_void, std::ptr::null_mut());
+    if v == -1 && errno() != 0 {
+        return Err(os_err("PTRACE_PEEKUSER"));
+    }
+    Ok(v as u64)
+}
+
+/// Write debug register `n` (`PTRACE_POKEUSER`).
+#[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+pub fn poke_user(pid: pid_t, offset: usize, data: u64) -> DbgResult<()> {
+    if raw(libc::PTRACE_POKEUSER, pid, offset as *mut c_void, data as usize as *mut c_void) == -1 {
+        return Err(os_err("PTRACE_POKEUSER"));
+    }
+    Ok(())
+}
