@@ -94,6 +94,22 @@ impl LinuxPtraceBackend {
         self.pending_signal = 0;
     }
 
+    /// Ensure the tracee is in a ptrace-stop (required by PTRACE_DETACH etc.).
+    /// If it is running, send SIGSTOP and wait for the stop; updates state to
+    /// `Stopped` (or `Exited` if it exited while we waited).
+    fn stop_for_ptrace(&mut self, pid: pid_t) {
+        if self.state != TargetState::Running {
+            return;
+        }
+        ptrace::send_signal(pid, libc::SIGSTOP);
+        if let Ok(status) = ptrace::wait(pid) {
+            match ptrace::decode_status(status) {
+                WaitOutcome::Exited(_) | WaitOutcome::Signalled(_) => self.mark_exited(),
+                _ => self.state = TargetState::Stopped,
+            }
+        }
+    }
+
     /// Interpret a `waitpid` result into a high-level event, handling the
     /// register/byte fix-up when we land on one of our breakpoints.
     fn interpret(&mut self, status: i32, was_step: bool) -> DbgResult<DebuggerEvent> {
@@ -385,11 +401,15 @@ impl Drop for LinuxPtraceBackend {
         }
         if self.attached {
             // Leave a process we attached to running: restore any patched
-            // breakpoints and detach instead of killing it.
+            // breakpoints and detach instead of killing it. Detach needs the
+            // tracee in ptrace-stop, so stop it first if it is running.
+            self.stop_for_ptrace(pid);
             for (addr, orig) in self.orig.drain() {
                 let _ = ptrace::write_mem(pid, addr, &orig);
             }
-            let _ = ptrace::detach(pid, 0);
+            if !matches!(self.state, TargetState::Exited) {
+                let _ = ptrace::detach(pid, 0);
+            }
         } else {
             // We launched this child: tear it down.
             ptrace::send_signal(pid, libc::SIGKILL);
@@ -474,11 +494,17 @@ impl DebugBackend for LinuxPtraceBackend {
 
     fn detach(&mut self) -> DbgResult<()> {
         if let Some(pid) = self.pid {
+            // PTRACE_DETACH needs the tracee in ptrace-stop; stop it if running.
+            self.stop_for_ptrace(pid);
             // Restore every patched breakpoint before letting the process go.
             for (addr, orig) in self.orig.drain() {
                 let _ = ptrace::write_mem(pid, addr, &orig);
             }
-            let _ = ptrace::detach(pid, 0);
+            // Skip the detach if it already exited; otherwise propagate failure
+            // (leaving pid set) rather than pretending we cleanly detached.
+            if !matches!(self.state, TargetState::Exited) {
+                ptrace::detach(pid, 0)?;
+            }
         }
         self.state = TargetState::NotStarted;
         self.pid = None;
