@@ -55,16 +55,24 @@ pub trait DebugBackend {
     /// Set a hardware breakpoint / watchpoint using the CPU debug registers.
     ///
     /// Backends with debug-register support (x86 via DR0–DR7) override this to
-    /// trap on execute / read / write / access. The default implementation
-    /// falls back to a software breakpoint at `address`, so the feature always
-    /// works (as an execute breakpoint) rather than reporting "unsupported".
+    /// trap on execute / read / write / access. The default implementation can
+    /// only emulate an *execute* breakpoint (with a software breakpoint); data
+    /// watchpoints are rejected rather than silently planting an `int3` byte
+    /// into the watched data, which would corrupt the debuggee.
     fn set_hardware_breakpoint(
         &mut self,
         address: u64,
-        _kind: BreakpointKind,
+        kind: BreakpointKind,
         _size: u8,
     ) -> DbgResult<BreakpointId> {
-        self.set_breakpoint(address)
+        match kind {
+            BreakpointKind::HardwareExecute | BreakpointKind::Software => self.set_breakpoint(address),
+            BreakpointKind::HardwareRead | BreakpointKind::HardwareWrite | BreakpointKind::HardwareAccess => {
+                Err(DbgError::Unsupported(
+                    "data watchpoints require hardware debug registers, which this backend does not program".into(),
+                ))
+            }
+        }
     }
 
     fn remove_breakpoint(&mut self, id: BreakpointId) -> DbgResult<()>;

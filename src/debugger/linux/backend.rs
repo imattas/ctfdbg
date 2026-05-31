@@ -563,6 +563,25 @@ impl DebugBackend for LinuxPtraceBackend {
             return Ok(());
         }
         let pid = self.require_running()?;
+
+        // Hardware breakpoints live in a debug-register slot; toggle DR7's
+        // enable bit rather than patching the (data) address with an int3.
+        #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+        if let Some(slot) = self.hw_slots.iter().position(|s| matches!(s, Some((sid, _)) if *sid == id)) {
+            let mut dr7 = ptrace::peek_user(pid, ptrace::debugreg_offset(7))?;
+            if enabled {
+                dr7 |= 1u64 << (slot * 2);
+            } else {
+                dr7 &= !(1u64 << (slot * 2));
+            }
+            ptrace::poke_user(pid, ptrace::debugreg_offset(7), dr7)?;
+            if let Some(bp) = self.breakpoints.get_mut(&id) {
+                bp.enabled = enabled;
+            }
+            return Ok(());
+        }
+
+        // Software breakpoint: patch / restore the instruction byte(s).
         if enabled {
             let original = ptrace::read_mem(pid, address, arch::BP_BYTES.len())?;
             ptrace::write_mem(pid, address, arch::BP_BYTES)?;
