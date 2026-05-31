@@ -728,21 +728,39 @@ impl DebugBackend for WindowsDebugBackend {
     }
 
     fn stack_trace(&self, thread_id: u32) -> DbgResult<Vec<StackFrame>> {
-        // Minimal stack trace: just the current PC frame. A full unwind via
-        // StackWalkEx is left as a TODO.
+        let thread_id = if thread_id != 0 { thread_id } else { self.last_stop_thread };
         let regs = self.read_registers(Some(thread_id))?;
-        let frame = StackFrame {
-            frame_index: 0,
-            thread_id,
-            pc: regs.pc().unwrap_or(0),
-            sp: regs.sp().unwrap_or(0),
-            fp: regs.fp().unwrap_or(0),
-            function: None,
-            module: self.modules.iter()
-                .find(|m| m.contains(regs.pc().unwrap_or(0)))
-                .map(|m| m.name.clone()),
-        };
-        Ok(vec![frame])
+        let pc = regs.pc().unwrap_or(0);
+        let sp = regs.sp().unwrap_or(0);
+        let fp = regs.fp().unwrap_or(0);
+        let ptr_size = if regs.architecture.is_64bit() { 8 } else { 4 };
+        // Frame-pointer unwind through the saved RBP/EBP chain.
+        let unwound = crate::analysis::stack::frame_pointer_unwind(pc, fp, ptr_size, 64, |addr| {
+            self.read_memory(addr, ptr_size).ok().and_then(|b| {
+                if b.len() < ptr_size {
+                    None
+                } else {
+                    let mut buf = [0u8; 8];
+                    buf[..ptr_size].copy_from_slice(&b[..ptr_size]);
+                    Some(u64::from_le_bytes(buf))
+                }
+            })
+        });
+        let module_of = |addr: u64| self.modules.iter().find(|m| m.contains(addr)).map(|m| m.name.clone());
+        let frames = unwound
+            .iter()
+            .enumerate()
+            .map(|(i, f)| StackFrame {
+                frame_index: i as u32,
+                thread_id,
+                pc: f.pc,
+                sp: if i == 0 { sp } else { f.fp },
+                fp: f.fp,
+                function: None,
+                module: module_of(f.pc),
+            })
+            .collect();
+        Ok(frames)
     }
 }
 

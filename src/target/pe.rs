@@ -84,7 +84,7 @@ pub fn parse_pe(bytes: &[u8], path: Option<std::path::PathBuf>) -> DbgResult<Bin
         })
         .collect();
 
-    // Symbols: combine exports for now
+    // Symbols: PE exports, with imports appended below.
     let mut symbols: Vec<Symbol> = pe
         .exports
         .iter()

@@ -1,8 +1,9 @@
+use crate::debugger::breakpoint::BreakpointKind;
 use crate::gui::actions::Action;
 use crate::gui::state::AppState;
 use egui::Context;
 
-pub fn show(ctx: &Context, state: &mut AppState, _actions: &mut Vec<Action>) {
+pub fn show(ctx: &Context, state: &mut AppState, actions: &mut Vec<Action>) {
     if !state.show_hw_breakpoint { return; }
     let mut open = true;
     let id_addr = egui::Id::new("hwbp_addr");
@@ -38,13 +39,27 @@ pub fn show(ctx: &Context, state: &mut AppState, _actions: &mut Vec<Action>) {
             ui.end_row();
         });
         ui.separator();
-        ui.label("Note: hardware breakpoints are not yet implemented in the Windows backend; this dialog is provided for UI completeness. TODO: wire up via Dr0..Dr3 + Dr7.");
+        ui.label(
+            "Backed by CPU debug registers (x86 DR0–DR3 + DR7) where available; \
+             on architectures without them, an execute breakpoint falls back to software.",
+        );
         ui.separator();
         ui.horizontal(|ui| {
             if ui.button("Cancel").clicked() { state.show_hw_breakpoint = false; }
-            if ui.button("Add (TODO)").clicked() {
-                state.console_output.push(format!("[!] hardware breakpoint not yet supported (addr={addr}, kind={kind}, size={size})"));
-                state.show_hw_breakpoint = false;
+            if ui.button("Add").clicked() {
+                match crate::gui::widgets::address::parse_hex(&addr) {
+                    Some(address) => {
+                        let bp_kind = match kind {
+                            0 => BreakpointKind::HardwareExecute,
+                            1 => BreakpointKind::HardwareRead,
+                            2 => BreakpointKind::HardwareWrite,
+                            _ => BreakpointKind::HardwareAccess,
+                        };
+                        actions.push(Action::SetHardwareBreakpoint { address, kind: bp_kind, size });
+                        state.show_hw_breakpoint = false;
+                    }
+                    None => state.console_output.push(format!("[!] invalid address: {addr}")),
+                }
             }
         });
     });

@@ -1,0 +1,153 @@
+name: Build, Test & Release
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Build all targets and publish a GitHub release under this tag (e.g. v0.2.0). Leave blank to just build & test."
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            kind: linux-native
+          - name: linux-arm64
+            os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            kind: linux-native
+          - name: linux-i686
+            os: ubuntu-22.04
+            target: i686-unknown-linux-gnu
+            kind: linux-cross
+          - name: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            kind: win-native
+          - name: windows-i686
+            os: windows-latest
+            target: i686-pc-windows-msvc
+            kind: win-native
+          - name: windows-arm64
+            os: windows-latest
+            target: aarch64-pc-windows-msvc
+            kind: win-cross
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+          components: clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # The GUI dlopen's X11/GL/Wayland at runtime, so no -dev libs are needed
+      # to *build*. The i686 cross build needs a 32-bit C toolchain (capstone)
+      # and QEMU to run the test suite.
+      - name: Install i686 cross toolchain + QEMU
+        if: matrix.kind == 'linux-cross'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-i686-linux-gnu g++-i686-linux-gnu qemu-user qemu-user-static
+
+      - name: Cross env (i686)
+        if: matrix.kind == 'linux-cross'
+        run: |
+          {
+            echo "CARGO_TARGET_I686_UNKNOWN_LINUX_GNU_LINKER=i686-linux-gnu-gcc"
+            echo "CC_i686_unknown_linux_gnu=i686-linux-gnu-gcc"
+            echo "CXX_i686_unknown_linux_gnu=i686-linux-gnu-g++"
+            echo "CARGO_TARGET_I686_UNKNOWN_LINUX_GNU_RUNNER=qemu-i386 -L /usr/i686-linux-gnu"
+          } >> "$GITHUB_ENV"
+
+      # Informational: clippy's lint set drifts between toolchain releases, so
+      # we surface suggestions without failing the build. The hard gate is a
+      # clean `cargo build` plus the test suite below.
+      - name: Clippy (informational)
+        if: matrix.kind == 'linux-native' || matrix.kind == 'win-native'
+        continue-on-error: true
+        run: cargo clippy --target ${{ matrix.target }} --all-targets
+
+      - name: Build (release, full GUI)
+        run: cargo build --release --target ${{ matrix.target }}
+
+      # Native targets run the whole suite (including the live-debugger tests on
+      # Linux x86-64 / arm64 and Windows). i686 runs the headless core under
+      # QEMU. The arm64-Windows leg is cross-built only (no arm64 Windows runner).
+      - name: Test (native)
+        if: matrix.kind == 'linux-native' || matrix.kind == 'win-native'
+        run: cargo test --release --target ${{ matrix.target }}
+
+      - name: Test (i686 core under QEMU)
+        if: matrix.kind == 'linux-cross'
+        run: cargo test --release --no-default-features --target ${{ matrix.target }}
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          bin="target/${{ matrix.target }}/release/ctfdbg"
+          out="ctfdbg-${{ matrix.name }}"
+          cp "$bin" "$out"
+          tar -czf "$out.tar.gz" "$out"
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Copy-Item "target/${{ matrix.target }}/release/ctfdbg.exe" "ctfdbg-${{ matrix.name }}.exe"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctfdbg-${{ matrix.name }}
+          path: |
+            ctfdbg-${{ matrix.name }}.tar.gz
+            ctfdbg-${{ matrix.name }}.exe
+          if-no-files-found: ignore
+
+  # Publishes a GitHub release containing every platform's binary. Runs when a
+  # v* tag is pushed, or when the workflow is dispatched manually with a
+  # `release_tag` input.
+  release:
+    name: Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/') || github.event.inputs.release_tag != ''
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - name: Publish release with all binaries
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.release_tag || github.ref_name }}
+          name: ${{ github.event.inputs.release_tag || github.ref_name }}
+          files: dist/**/*
+          generate_release_notes: true
+          fail_on_unmatched_files: false

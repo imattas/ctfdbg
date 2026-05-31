@@ -1,6 +1,6 @@
 //! Backend trait + a fallback Unsupported impl.
 
-use crate::debugger::breakpoint::{BreakpointId, BreakpointInfo};
+use crate::debugger::breakpoint::{BreakpointId, BreakpointInfo, BreakpointKind};
 use crate::debugger::events::DebuggerEvent;
 use crate::debugger::modules::DebugModule;
 use crate::debugger::registers::RegisterFile;
@@ -22,11 +22,24 @@ pub struct DebugTarget {
     pub break_on_tls_callbacks: bool,
 }
 
+/// Sink for bytes captured from the target's stdout/stderr.
+pub type OutputSink = std::sync::Arc<dyn Fn(Vec<u8>) + Send + Sync>;
+
 /// Cross-platform debugger backend trait.
 ///
 /// Implementors run on a worker thread and own the OS-level handles.
 pub trait DebugBackend {
     fn name(&self) -> &'static str;
+
+    /// Install a sink that receives bytes written by the target to
+    /// stdout/stderr. Backends that capture output call it from reader threads.
+    /// Default: no capture.
+    fn set_output_sink(&mut self, _sink: OutputSink) {}
+
+    /// Write bytes to the target's standard input. Default: unsupported.
+    fn write_stdin(&mut self, _data: &[u8]) -> DbgResult<()> {
+        Err(DbgError::Unsupported("standard-input redirection is not supported by this backend".into()))
+    }
 
     fn state(&self) -> TargetState;
     fn pid(&self) -> Option<u32>;
@@ -51,6 +64,30 @@ pub trait DebugBackend {
     fn write_memory(&mut self, address: u64, data: &[u8]) -> DbgResult<()>;
 
     fn set_breakpoint(&mut self, address: u64) -> DbgResult<BreakpointId>;
+
+    /// Set a hardware breakpoint / watchpoint using the CPU debug registers.
+    ///
+    /// Backends with debug-register support (x86 via DR0–DR7) override this to
+    /// trap on execute / read / write / access. The default implementation can
+    /// only emulate an *execute* breakpoint (with a software breakpoint); data
+    /// watchpoints are rejected rather than silently planting an `int3` byte
+    /// into the watched data, which would corrupt the debuggee.
+    fn set_hardware_breakpoint(
+        &mut self,
+        address: u64,
+        kind: BreakpointKind,
+        _size: u8,
+    ) -> DbgResult<BreakpointId> {
+        match kind {
+            BreakpointKind::HardwareExecute | BreakpointKind::Software => self.set_breakpoint(address),
+            BreakpointKind::HardwareRead | BreakpointKind::HardwareWrite | BreakpointKind::HardwareAccess => {
+                Err(DbgError::Unsupported(
+                    "data watchpoints require hardware debug registers, which this backend does not program".into(),
+                ))
+            }
+        }
+    }
+
     fn remove_breakpoint(&mut self, id: BreakpointId) -> DbgResult<()>;
     fn enable_breakpoint(&mut self, id: BreakpointId, enabled: bool) -> DbgResult<()>;
     fn set_breakpoint_condition(&mut self, id: BreakpointId, condition: Option<String>) -> DbgResult<()>;

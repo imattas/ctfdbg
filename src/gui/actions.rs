@@ -1,5 +1,7 @@
 //! Action enum sent from UI elements to the central dispatcher.
 
+use crate::debugger::breakpoint::BreakpointKind;
+
 #[derive(Debug, Clone)]
 pub enum Action {
     Launch,
@@ -19,10 +21,13 @@ pub enum Action {
     OverrideIpDialog,
     JumpToIp,
     ToggleBreakpointAt(u64),
+    SetHardwareBreakpoint { address: u64, kind: BreakpointKind, size: u8 },
     RunToAddress(u64),
     NavigateTo(u64),
     SetActiveThread(u32),
     ConsoleCommand(String),
+    /// Run a built-in plugin by id (no argument); output goes to the console.
+    RunPlugin(String),
     OpenFile(std::path::PathBuf),
     OpenFileDialog,
     Quit,

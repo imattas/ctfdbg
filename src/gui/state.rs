@@ -37,11 +37,14 @@ pub enum DebugCommand {
     StepReturn,
     RunToAddress(u64),
     SetBreakpoint(u64),
+    SetHardwareBreakpoint(u64, crate::debugger::breakpoint::BreakpointKind, u8),
     RemoveBreakpoint(u64),
     EnableBreakpoint(u64, bool),
     SetCondition(u64, Option<String>),
     WriteMemory(u64, Vec<u8>),
     ReadMemory(u64, usize),
+    /// Send bytes to the target's standard input.
+    SendStdin(Vec<u8>),
     WriteRegister(String, u64),
     SetIp(u64),
     /// Refresh registers/threads/modules without changing run state.
@@ -60,6 +63,8 @@ pub enum BackendUpdate {
     Breakpoints(Vec<BreakpointInfo>),
     StackTrace(Vec<StackFrame>),
     MemoryAt(u64, Vec<u8>),
+    /// Bytes captured from the target's stdout/stderr.
+    TargetOutput(Vec<u8>),
     Log(String),
     Error(String),
 }
@@ -95,6 +100,13 @@ pub struct AppState {
     pub console_history: Vec<String>,
     pub console_output: Vec<String>,
     pub target_console: Vec<String>,
+    /// True when the last target-output chunk didn't end in a newline, so the
+    /// next chunk continues the same console line.
+    pub target_console_open_line: bool,
+    /// Pending text typed into the Target Console stdin box.
+    pub target_stdin_input: String,
+    /// `KEY=VALUE` lines edited in the adapter-settings Environment box.
+    pub adapter_env_text: String,
     pub logs: Vec<LogLine>,
     pub status_message: String,
     pub last_event_label: String,
@@ -163,7 +175,10 @@ impl AppState {
             console_input: String::new(),
             console_history: vec![],
             console_output: vec!["ctfdbg console. Type 'help' or use the toolbar.".into()],
-            target_console: vec!["[target stdout/stderr will appear here when redirected]".into()],
+            target_console: vec![],
+            target_console_open_line: false,
+            target_stdin_input: String::new(),
+            adapter_env_text: String::new(),
             logs: vec![],
             status_message: "Ready".into(),
             last_event_label: String::new(),
@@ -268,6 +283,14 @@ fn worker_main(cfg: DebugConfig, cmd_rx: Receiver<DebugCommand>, upd_tx: Sender<
     };
     let _ = upd_tx.send(BackendUpdate::Log(format!("backend: {}", backend.name())));
 
+    // Stream the target's stdout/stderr into the Target Console.
+    {
+        let sink_tx = upd_tx.clone();
+        backend.set_output_sink(Arc::new(move |bytes| {
+            let _ = sink_tx.send(BackendUpdate::TargetOutput(bytes));
+        }));
+    }
+
     let send_state = |b: &dyn DebugBackend, tx: &Sender<BackendUpdate>| {
         let _ = tx.send(BackendUpdate::State(b.state()));
         let _ = tx.send(BackendUpdate::Pid(b.pid()));
@@ -277,6 +300,7 @@ fn worker_main(cfg: DebugConfig, cmd_rx: Receiver<DebugCommand>, upd_tx: Sender<
         if let Ok(rf) = b.read_registers(None) { let _ = tx.send(BackendUpdate::Registers(rf)); }
         if let Ok(t) = b.list_threads() { let _ = tx.send(BackendUpdate::Threads(t)); }
         if let Ok(m) = b.list_modules() { let _ = tx.send(BackendUpdate::Modules(m)); }
+        if let Ok(st) = b.stack_trace(0) { let _ = tx.send(BackendUpdate::StackTrace(st)); }
         let _ = tx.send(BackendUpdate::Breakpoints(b.list_breakpoints()));
     };
 
@@ -298,7 +322,15 @@ fn worker_main(cfg: DebugConfig, cmd_rx: Receiver<DebugCommand>, upd_tx: Sender<
                 DebugCommand::Detach => { backend.detach()?; send_state(backend.as_ref(), &upd_tx); }
                 DebugCommand::Kill => { backend.kill()?; send_state(backend.as_ref(), &upd_tx); }
                 DebugCommand::Continue => {
-                    let ev = backend.continue_exec()?;
+                    // Honour conditional breakpoints: if we stop at a breakpoint
+                    // whose condition evaluates to false, resume automatically.
+                    let mut ev = backend.continue_exec()?;
+                    while let DebuggerEvent::BreakpointHit { id, .. } = ev {
+                        if breakpoint_condition_met(backend.as_ref(), id) {
+                            break;
+                        }
+                        ev = backend.continue_exec()?;
+                    }
                     let _ = upd_tx.send(BackendUpdate::Event(ev));
                     publish_after_stop(&mut backend, &upd_tx);
                 }
@@ -328,6 +360,7 @@ fn worker_main(cfg: DebugConfig, cmd_rx: Receiver<DebugCommand>, upd_tx: Sender<
                     publish_after_stop(&mut backend, &upd_tx);
                 }
                 DebugCommand::SetBreakpoint(a) => { backend.set_breakpoint(a)?; let _ = upd_tx.send(BackendUpdate::Breakpoints(backend.list_breakpoints())); }
+                DebugCommand::SetHardwareBreakpoint(a, kind, size) => { backend.set_hardware_breakpoint(a, kind, size)?; let _ = upd_tx.send(BackendUpdate::Breakpoints(backend.list_breakpoints())); }
                 DebugCommand::RemoveBreakpoint(id) => { backend.remove_breakpoint(crate::debugger::breakpoint::BreakpointId(id))?; let _ = upd_tx.send(BackendUpdate::Breakpoints(backend.list_breakpoints())); }
                 DebugCommand::EnableBreakpoint(id, e) => { backend.enable_breakpoint(crate::debugger::breakpoint::BreakpointId(id), e)?; let _ = upd_tx.send(BackendUpdate::Breakpoints(backend.list_breakpoints())); }
                 DebugCommand::SetCondition(id, c) => { backend.set_breakpoint_condition(crate::debugger::breakpoint::BreakpointId(id), c)?; let _ = upd_tx.send(BackendUpdate::Breakpoints(backend.list_breakpoints())); }
@@ -336,6 +369,7 @@ fn worker_main(cfg: DebugConfig, cmd_rx: Receiver<DebugCommand>, upd_tx: Sender<
                     let data = backend.read_memory(a, n)?;
                     let _ = upd_tx.send(BackendUpdate::MemoryAt(a, data));
                 }
+                DebugCommand::SendStdin(data) => { backend.write_stdin(&data)?; }
                 DebugCommand::WriteRegister(name, val) => { backend.write_register(None, &name, val)?; if let Ok(rf) = backend.read_registers(None) { let _ = upd_tx.send(BackendUpdate::Registers(rf)); } }
                 DebugCommand::SetIp(a) => { backend.set_instruction_pointer(None, a)?; if let Ok(rf) = backend.read_registers(None) { let _ = upd_tx.send(BackendUpdate::Registers(rf)); } }
                 DebugCommand::Refresh => publish_after_stop(&mut backend, &upd_tx),
@@ -345,6 +379,30 @@ fn worker_main(cfg: DebugConfig, cmd_rx: Receiver<DebugCommand>, upd_tx: Sender<
         if let Err(e) = res {
             let _ = upd_tx.send(BackendUpdate::Error(e.to_string()));
         }
+    }
+}
+
+/// Adapter so breakpoint-condition expressions can dereference target memory.
+struct BackendMemory<'a>(&'a (dyn DebugBackend + Send));
+impl crate::debugger::expressions::MemoryReader for BackendMemory<'_> {
+    fn read(&self, address: u64, size: usize) -> DbgResult<Vec<u8>> {
+        self.0.read_memory(address, size)
+    }
+}
+
+/// Evaluate a breakpoint's condition (if any) against the current state.
+/// Returns `true` (stop) when there is no condition, the condition can't be
+/// evaluated, or it evaluates to a non-zero value.
+fn breakpoint_condition_met(backend: &(dyn DebugBackend + Send), id: u64) -> bool {
+    let bps = backend.list_breakpoints();
+    let Some(bp) = bps.iter().find(|b| b.id.0 == id) else { return true };
+    let Some(cond) = bp.condition.as_ref().filter(|c| !c.trim().is_empty()) else { return true };
+    let Ok(expr) = crate::debugger::expressions::parse(cond) else { return true };
+    let Ok(regs) = backend.read_registers(None) else { return true };
+    let ptr = regs.architecture.pointer_size();
+    match crate::debugger::expressions::evaluate(&expr, &regs, &BackendMemory(backend), ptr) {
+        Ok(v) => v != 0,
+        Err(_) => true,
     }
 }
 

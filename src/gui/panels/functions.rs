@@ -8,8 +8,6 @@ use crate::gui::theme::color;
 
 pub fn show(ui: &mut Ui, state: &mut AppState, actions: &mut Vec<Action>) {
     ui.horizontal(|ui| {
-        ui.heading("Functions");
-        ui.separator();
         if ui.button("Re-analyze").clicked() {
             state.rerun_auto_analysis();
         }

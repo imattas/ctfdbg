@@ -61,8 +61,8 @@ pub fn score_english(data: &[u8]) -> f64 {
             b'n' => 6.7,
             b's' | b'h' | b'r' => 6.0,
             b'd' | b'l' => 4.0,
-            b'a'..=b'z' => 2.0,
-            b'0'..=b'9' => 0.5,
+            other if other.is_ascii_lowercase() => 2.0,
+            other if other.is_ascii_digit() => 0.5,
             _ => -0.5,
         };
     }
@@ -95,7 +95,7 @@ pub fn rank_keysizes(data: &[u8], max_keysize: usize) -> Vec<(usize, f64)> {
     let mut scored = Vec::new();
     for ks in 2..=max {
         // Average distance over as many block pairs as we can afford.
-        let blocks = (data.len() / ks).min(8).max(2);
+        let blocks = (data.len() / ks).clamp(2, 8);
         if blocks < 2 {
             continue;
         }
@@ -138,7 +138,7 @@ pub fn break_repeating_xor(data: &[u8], keysize: usize) -> (Vec<u8>, Vec<u8>) {
 pub fn minimal_period(key: &[u8]) -> Vec<u8> {
     let n = key.len();
     for d in 1..=n {
-        if n % d == 0 && (0..n).all(|i| key[i] == key[i % d]) {
+        if n.is_multiple_of(d) && (0..n).all(|i| key[i] == key[i % d]) {
             return key[..d].to_vec();
         }
     }

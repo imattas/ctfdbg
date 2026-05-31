@@ -49,9 +49,26 @@ fn make_windows() -> DbgResult<Box<dyn backend::DebugBackend + Send>> {
     )))
 }
 
-#[cfg(unix)]
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "x86", target_arch = "aarch64")
+))]
 fn make_linux() -> DbgResult<Box<dyn backend::DebugBackend + Send>> {
     Ok(Box::new(linux::backend::LinuxPtraceBackend::new()))
+}
+
+#[cfg(all(
+    unix,
+    not(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "x86", target_arch = "aarch64")
+    ))
+))]
+fn make_linux() -> DbgResult<Box<dyn backend::DebugBackend + Send>> {
+    Ok(Box::new(backend::UnsupportedBackend::new(
+        "live ptrace debugging is implemented for Linux x86-64 / x86 / AArch64; \
+         this platform/architecture is not yet supported",
+    )))
 }
 
 #[cfg(not(unix))]

@@ -6,7 +6,7 @@ use crate::error::{DbgError, DbgResult};
 pub fn parse_line(line: &str) -> DbgResult<Option<Command>> {
     let line = line.trim();
     if line.is_empty() { return Ok(None); }
-    if line.starts_with('#') { return Ok(Some(Command::Comment(line[1..].trim().into()))); }
+    if let Some(comment) = line.strip_prefix('#') { return Ok(Some(Command::Comment(comment.trim().into()))); }
 
     let mut parts = line.split_whitespace();
     let head = parts.next().unwrap();

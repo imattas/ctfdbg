@@ -117,7 +117,7 @@ impl Plugin for DisasmPlugin {
         let arg = arg.unwrap_or("");
         let mut parts = arg.split_whitespace();
         let addr_str = parts.next().unwrap_or("");
-        let count: usize = parts.next().and_then(|s| parse_num_usize(s)).unwrap_or(16);
+        let count: usize = parts.next().and_then(parse_num_usize).unwrap_or(16);
         let Some(addr) = parse_num(addr_str) else {
             return out.line("[!] usage: disasm <addr> [insn-count]");
         };

@@ -31,7 +31,7 @@ impl App {
         match u {
             BackendUpdate::State(s) => {
                 self.state.state = s;
-                self.state.status_message = format!("{}", s.label());
+                self.state.status_message = s.label().to_string();
             }
             BackendUpdate::Pid(p) => self.state.pid = p,
             BackendUpdate::Event(ev) => {
@@ -72,6 +72,28 @@ impl App {
             BackendUpdate::MemoryAt(addr, data) => {
                 self.state.memory_view_address = addr;
                 self.state.memory_bytes = data;
+            }
+            BackendUpdate::TargetOutput(bytes) => {
+                // Append captured target output, splitting into console lines.
+                let text = String::from_utf8_lossy(&bytes);
+                let mut parts = text.split('\n').peekable();
+                while let Some(seg) = parts.next() {
+                    let last = parts.peek().is_none();
+                    if last && seg.is_empty() {
+                        break;
+                    }
+                    // Continue the previous partial line when output didn't end in '\n'.
+                    if self.state.target_console_open_line {
+                        if let Some(prev) = self.state.target_console.last_mut() {
+                            prev.push_str(seg);
+                        } else {
+                            self.state.target_console.push(seg.to_string());
+                        }
+                    } else {
+                        self.state.target_console.push(seg.to_string());
+                    }
+                    self.state.target_console_open_line = !last;
+                }
             }
             BackendUpdate::Log(l) => self.state.logs.push(crate::gui::state::LogLine {
                 level: tracing::Level::INFO, text: l,
@@ -129,6 +151,9 @@ impl App {
                     self.state.send(DebugCommand::SetBreakpoint(addr));
                 }
             }
+            Action::SetHardwareBreakpoint { address, kind, size } => {
+                self.state.send(DebugCommand::SetHardwareBreakpoint(address, kind, size));
+            }
             Action::RunToAddress(a) => self.state.send(DebugCommand::RunToAddress(a)),
             Action::NavigateTo(a) => {
                 self.state.disasm_address = a;
@@ -136,6 +161,22 @@ impl App {
             }
             Action::SetActiveThread(tid) => self.state.active_thread = Some(tid),
             Action::ConsoleCommand(line) => crate::gui::panels::debugger_console::execute(&mut self.state, &line),
+            Action::RunPlugin(id) => {
+                // Take the registry out so the plugin can borrow &AppState while
+                // we then mutate the console; restore it afterwards.
+                let registry = std::mem::take(&mut self.state.plugins);
+                match registry.get(&id) {
+                    Some(p) => {
+                        let out = p.run(&self.state, None);
+                        for line in out.lines {
+                            self.state.console_output.push(format!("[{id}] {line}"));
+                        }
+                        self.pending_actions.extend(out.actions);
+                    }
+                    None => self.state.console_output.push(format!("[!] unknown plugin: {id}")),
+                }
+                self.state.plugins = registry;
+            }
             Action::OpenFileDialog => {
                 if let Some(p) = rfd::FileDialog::new()
                     .add_filter("Binaries", &["exe", "dll", "sys", "elf", "so", "bin"])

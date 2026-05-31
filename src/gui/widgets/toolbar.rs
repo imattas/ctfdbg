@@ -60,7 +60,31 @@ pub fn menu_bar(ctx: &Context, state: &mut AppState, actions: &mut Vec<Action>) 
                     ui.close_menu();
                 }
             });
-            ui.menu_button("Plugins", |ui| { ui.label(RichText::new("(no plugins loaded)").color(color::MUTED)); });
+            ui.menu_button("Plugins", |ui| {
+                let metas = state.plugins.list();
+                if metas.is_empty() {
+                    ui.label(RichText::new("(no plugins loaded)").color(color::MUTED));
+                } else {
+                    for &cat in crate::plugins::PluginCategory::ALL {
+                        let group: Vec<_> = metas.iter().filter(|m| m.category == cat).collect();
+                        if group.is_empty() { continue; }
+                        ui.menu_button(cat.label(), |ui| {
+                            for m in group {
+                                if ui.button(m.name).on_hover_text(m.description).clicked() {
+                                    actions.push(Action::RunPlugin(m.id.to_string()));
+                                    ui.close_menu();
+                                }
+                            }
+                        });
+                    }
+                    ui.separator();
+                    ui.label(
+                        RichText::new("Tools needing an argument: use the Plugins panel or the console (e.g. `deobf <expr>`, `disasm <addr>`).")
+                            .color(color::MUTED)
+                            .small(),
+                    );
+                }
+            });
             ui.menu_button("Window", |ui| {
                 ui.label(RichText::new("Drag any panel tab to rearrange.").color(color::MUTED));
                 ui.separator();

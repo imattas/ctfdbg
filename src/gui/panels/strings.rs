@@ -8,8 +8,6 @@ use crate::gui::theme::color;
 
 pub fn show(ui: &mut Ui, state: &mut AppState, actions: &mut Vec<Action>) {
     ui.horizontal(|ui| {
-        ui.heading("Strings");
-        ui.separator();
         ui.label("Filter:");
         ui.text_edit_singleline(&mut state.modules_search); // reuse existing search buffer
         if ui.button("Re-scan").clicked() {

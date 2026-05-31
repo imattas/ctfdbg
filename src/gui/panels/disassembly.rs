@@ -27,10 +27,7 @@ pub fn show(ui: &mut Ui, state: &mut AppState, actions: &mut Vec<Action>) {
         Ok(d) => d,
         Err(e) => { ui.label(format!("disasm init failed: {e}")); return; }
     };
-    let insns = match dis.disassemble(&bytes, state.disasm_address, 60) {
-        Ok(v) => v,
-        Err(_) => vec![],
-    };
+    let insns = dis.disassemble(&bytes, state.disasm_address, 60).unwrap_or_default();
 
     let pc = state.registers.pc().unwrap_or(0);
     let bp_addrs: std::collections::HashSet<u64> =

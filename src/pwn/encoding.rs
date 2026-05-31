@@ -11,7 +11,7 @@ const B64_STD: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxy
 const B64_URL: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
 fn b64_encode_with(data: &[u8], alpha: &[u8; 64], pad: bool) -> String {
-    let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
         let b = [
             chunk[0],
@@ -86,7 +86,7 @@ pub fn base32_encode(data: &[u8]) -> String {
             | (buf[2] as u64) << 16
             | (buf[3] as u64) << 8
             | buf[4] as u64;
-        let chars = (chunk.len() * 8 + 4) / 5;
+        let chars = (chunk.len() * 8).div_ceil(5);
         for i in 0..8 {
             if i < chars {
                 out.push(B32[((n >> (35 - i * 5)) & 0x1f) as usize] as char);
@@ -137,7 +137,7 @@ pub fn hex_decode(s: &str) -> Option<Vec<u8>> {
         .filter(|c| !c.is_whitespace() && *c != ':' && *c != ',')
         .collect();
     let cleaned = cleaned.strip_prefix("0x").unwrap_or(&cleaned);
-    if cleaned.len() % 2 != 0 {
+    if !cleaned.len().is_multiple_of(2) {
         return None;
     }
     hex::decode(cleaned).ok()
@@ -253,6 +253,10 @@ pub struct DecodeStep {
     pub output: Vec<u8>,
 }
 
+/// One decode attempt: a codec name and a closure that tries to decode.
+/// The closure borrows the current text, hence the lifetime parameter.
+type DecodeAttempt<'a> = (&'static str, Box<dyn Fn() -> Option<Vec<u8>> + 'a>);
+
 fn looks_textual(data: &[u8]) -> bool {
     !data.is_empty()
         && data
@@ -281,14 +285,14 @@ pub fn auto_decode(data: &[u8], max_depth: usize) -> Vec<DecodeStep> {
 
         // Each attempt must (a) succeed, (b) materially change the data, and
         // (c) not just produce garbage shorter than a couple of bytes.
-        let attempts: [(&'static str, Box<dyn Fn() -> Option<Vec<u8>>>); 6] = [
+        let attempts: [DecodeAttempt<'_>; 6] = [
             ("base64", Box::new(|| {
                 if trimmed.len() >= 4 && trimmed.bytes().all(|b| {
                     b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'-' | b'_' | b'=')
                 }) { base64_decode(trimmed) } else { None }
             })),
             ("hex", Box::new(|| {
-                if trimmed.len() >= 4 && trimmed.len() % 2 == 0
+                if trimmed.len() >= 4 && trimmed.len().is_multiple_of(2)
                     && trimmed.bytes().all(|b| b.is_ascii_hexdigit()) {
                     hex_decode(trimmed)
                 } else { None }

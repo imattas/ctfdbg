@@ -15,7 +15,7 @@ pub fn parse_elf(bytes: &[u8], path: Option<std::path::PathBuf>) -> DbgResult<Bi
     let arch = crate::target::bfd::from_elf_machine(elf.header.e_machine, !elf.little_endian)
         .map(|a| a.arch)
         .filter(|a| !matches!(a, Architecture::Unsupported))
-        .unwrap_or_else(|| match elf.header.e_machine {
+        .unwrap_or(match elf.header.e_machine {
             goblin::elf::header::EM_386 => Architecture::X86,
             goblin::elf::header::EM_X86_64 => Architecture::X86_64,
             goblin::elf::header::EM_ARM => Architecture::Arm,

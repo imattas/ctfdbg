@@ -57,7 +57,15 @@ pub fn show(ctx: &Context, state: &mut AppState, _actions: &mut Vec<Action>) {
                 ui.end_row();
 
                 ui.label("Environment:");
-                ui.label("(extra env vars not yet wired)");
+                let env_resp = ui.add(
+                    egui::TextEdit::multiline(&mut state.adapter_env_text)
+                        .hint_text("KEY=VALUE per line")
+                        .desired_rows(3)
+                        .desired_width(360.0),
+                );
+                if env_resp.changed() {
+                    state.adapter_target.environment = parse_env(&state.adapter_env_text);
+                }
                 ui.end_row();
 
                 ui.label("External terminal:");
@@ -88,6 +96,26 @@ pub fn show(ctx: &Context, state: &mut AppState, _actions: &mut Vec<Action>) {
         state.cfg.break_entry = state.adapter_target.break_on_entry;
         state.send(DebugCommand::Launch(state.adapter_target.clone()));
     }
+}
+
+/// Parse a `KEY=VALUE` per line block into environment pairs (blank lines and
+/// lines without `=` are ignored).
+fn parse_env(text: &str) -> Vec<(String, String)> {
+    text.lines()
+        .filter_map(|l| {
+            let l = l.trim();
+            if l.is_empty() {
+                return None;
+            }
+            let (k, v) = l.split_once('=')?;
+            let k = k.trim();
+            if k.is_empty() {
+                None
+            } else {
+                Some((k.to_string(), v.to_string()))
+            }
+        })
+        .collect()
 }
 
 #[cfg(target_os = "windows")]
