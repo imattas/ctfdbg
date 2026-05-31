@@ -21,7 +21,7 @@ pub fn show(ui: &mut Ui, state: &mut AppState, actions: &mut Vec<Action>) {
     // while later mutating `state.console_output` in the click handler.
     let metas = state.plugins.list();
 
-    for cat in [PluginCategory::Analysis, PluginCategory::Pwn, PluginCategory::Utility] {
+    for &cat in PluginCategory::ALL {
         let group: Vec<_> = metas.iter().filter(|m| m.category == cat).cloned().collect();
         if group.is_empty() { continue; }
         ui.collapsing(RichText::new(cat.label()).strong(), |ui| {

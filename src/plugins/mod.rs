@@ -45,17 +45,33 @@ pub struct PluginMeta {
 pub enum PluginCategory {
     Analysis,
     Pwn,
+    Crypto,
+    Deobfuscation,
+    Rev,
     Utility,
 }
 
 impl PluginCategory {
     pub fn label(self) -> &'static str {
         match self {
-            PluginCategory::Analysis => "Analysis",
-            PluginCategory::Pwn      => "Pwn",
-            PluginCategory::Utility  => "Utility",
+            PluginCategory::Analysis      => "Analysis",
+            PluginCategory::Pwn           => "Pwn",
+            PluginCategory::Crypto        => "Crypto",
+            PluginCategory::Deobfuscation => "Deobfuscation",
+            PluginCategory::Rev           => "Reverse Engineering",
+            PluginCategory::Utility       => "Utility",
         }
     }
+
+    /// All categories in display order.
+    pub const ALL: &'static [PluginCategory] = &[
+        PluginCategory::Analysis,
+        PluginCategory::Rev,
+        PluginCategory::Crypto,
+        PluginCategory::Deobfuscation,
+        PluginCategory::Pwn,
+        PluginCategory::Utility,
+    ];
 }
 
 pub trait Plugin: Send + Sync {
@@ -109,5 +125,21 @@ pub fn default_plugins() -> PluginRegistry {
     r.register(builtins::XorBrutePlugin);
     r.register(builtins::ShellcodeListPlugin);
     r.register(builtins::DisasmPlugin);
+    // Architecture / reverse-engineering
+    r.register(builtins::ArchListPlugin);
+    r.register(builtins::ArchInfoPlugin);
+    r.register(builtins::DisasmArchPlugin);
+    r.register(builtins::EntropyPlugin);
+    r.register(builtins::IocScanPlugin);
+    // Crypto
+    r.register(builtins::CryptoIdPlugin);
+    r.register(builtins::HashIdPlugin);
+    // Deobfuscation
+    r.register(builtins::DeobfuscatePlugin);
+    r.register(builtins::DecodePlugin);
+    r.register(builtins::XorKeyPlugin);
+    // Pwn
+    r.register(builtins::GadgetPlugin);
+    r.register(builtins::SyscallSitesPlugin);
     r
 }

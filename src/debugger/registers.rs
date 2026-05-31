@@ -28,7 +28,8 @@ impl RegisterFile {
         match self.architecture {
             Architecture::X86_64 | Architecture::Auto => self.get("rip"),
             Architecture::X86 => self.get("eip"),
-            Architecture::AArch64 | Architecture::Arm | Architecture::Riscv64 => self.get("pc"),
+            // Every other supported architecture names its program counter "pc".
+            _ => self.get("pc"),
         }
     }
 
