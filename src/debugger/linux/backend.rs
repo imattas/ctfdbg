@@ -314,6 +314,52 @@ impl LinuxPtraceBackend {
     }
 }
 
+/// Split a command-line argument string into argv with shell-like quoting.
+///
+/// Handles single quotes, double quotes, and backslash escapes; whitespace
+/// outside quotes separates arguments. Empty quoted strings (`''`) yield an
+/// empty argument. This matches how the CLI presents the `--args` field.
+fn split_args(s: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut cur = String::new();
+    let mut has_token = false;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' if !in_single => {
+                if let Some(n) = chars.next() {
+                    cur.push(n);
+                    has_token = true;
+                }
+            }
+            '\'' if !in_double => {
+                in_single = !in_single;
+                has_token = true;
+            }
+            '"' if !in_single => {
+                in_double = !in_double;
+                has_token = true;
+            }
+            c if c.is_whitespace() && !in_single && !in_double => {
+                if has_token {
+                    args.push(std::mem::take(&mut cur));
+                    has_token = false;
+                }
+            }
+            c => {
+                cur.push(c);
+                has_token = true;
+            }
+        }
+    }
+    if has_token {
+        args.push(cur);
+    }
+    args
+}
+
 /// x86 DR7 length encoding for a watchpoint size in bytes.
 #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
 fn len_bits(size: u8) -> u64 {
@@ -369,11 +415,9 @@ impl DebugBackend for LinuxPtraceBackend {
             .as_ref()
             .ok_or_else(|| DbgError::InvalidArgument("no executable specified".into()))?;
         let exe_str = exe.to_string_lossy().into_owned();
-        let args: Vec<String> = if target.arguments.trim().is_empty() {
-            vec![]
-        } else {
-            target.arguments.split_whitespace().map(|s| s.to_string()).collect()
-        };
+        // Parse the argument string with shell-like quoting (matching how the
+        // CLI / Windows backend treat it) so quoted arguments stay intact.
+        let args = split_args(&target.arguments);
         let cwd = target.working_directory.as_ref().map(|p| p.to_string_lossy().into_owned());
 
         let pid = ptrace::fork_exec(&exe_str, &args, cwd.as_deref())?;
@@ -960,5 +1004,22 @@ mod arch {
             }
         }
         true
+    }
+}
+
+#[cfg(test)]
+mod arg_tests {
+    use super::split_args;
+
+    #[test]
+    fn plain_and_quoted_arguments() {
+        assert_eq!(split_args(""), Vec::<String>::new());
+        assert_eq!(split_args("   "), Vec::<String>::new());
+        assert_eq!(split_args("a b c"), vec!["a", "b", "c"]);
+        assert_eq!(split_args("\"hello world\" --flag"), vec!["hello world", "--flag"]);
+        assert_eq!(split_args("'single quoted' x"), vec!["single quoted", "x"]);
+        assert_eq!(split_args(r#"a\ b"#), vec!["a b"]);
+        assert_eq!(split_args("''"), vec![""]);
+        assert_eq!(split_args(r#"--path="/a b/c" -n"#), vec!["--path=/a b/c", "-n"]);
     }
 }
