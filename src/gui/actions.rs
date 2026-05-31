@@ -26,6 +26,8 @@ pub enum Action {
     NavigateTo(u64),
     SetActiveThread(u32),
     ConsoleCommand(String),
+    /// Run a built-in plugin by id (no argument); output goes to the console.
+    RunPlugin(String),
     OpenFile(std::path::PathBuf),
     OpenFileDialog,
     Quit,

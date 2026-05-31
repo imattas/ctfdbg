@@ -139,6 +139,22 @@ impl App {
             }
             Action::SetActiveThread(tid) => self.state.active_thread = Some(tid),
             Action::ConsoleCommand(line) => crate::gui::panels::debugger_console::execute(&mut self.state, &line),
+            Action::RunPlugin(id) => {
+                // Take the registry out so the plugin can borrow &AppState while
+                // we then mutate the console; restore it afterwards.
+                let registry = std::mem::take(&mut self.state.plugins);
+                match registry.get(&id) {
+                    Some(p) => {
+                        let out = p.run(&self.state, None);
+                        for line in out.lines {
+                            self.state.console_output.push(format!("[{id}] {line}"));
+                        }
+                        self.pending_actions.extend(out.actions);
+                    }
+                    None => self.state.console_output.push(format!("[!] unknown plugin: {id}")),
+                }
+                self.state.plugins = registry;
+            }
             Action::OpenFileDialog => {
                 if let Some(p) = rfd::FileDialog::new()
                     .add_filter("Binaries", &["exe", "dll", "sys", "elf", "so", "bin"])
