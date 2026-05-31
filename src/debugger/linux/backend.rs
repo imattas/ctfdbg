@@ -259,10 +259,16 @@ impl LinuxPtraceBackend {
             .iter()
             .position(|s| s.is_none())
             .ok_or_else(|| DbgError::Breakpoint("all 4 hardware debug-register slots are in use".into()))?;
-        let (rw, len) = match kind {
-            BreakpointKind::HardwareExecute => (0b00u64, 0b00u64),
-            BreakpointKind::HardwareWrite => (0b01, len_bits(size)),
-            BreakpointKind::HardwareRead | BreakpointKind::HardwareAccess => (0b11, len_bits(size)),
+        // x86 DR7 RW encodings: 00=execute, 01=write, 11=read/write access.
+        // There is no read-only mode, so a "read" watchpoint is programmed as
+        // read/write access and reported as such (see `effective_kind`) rather
+        // than falsely promising read-only behaviour.
+        let (rw, len, effective_kind) = match kind {
+            BreakpointKind::HardwareExecute => (0b00u64, 0b00u64, kind),
+            BreakpointKind::HardwareWrite => (0b01, len_bits(size), kind),
+            BreakpointKind::HardwareRead | BreakpointKind::HardwareAccess => {
+                (0b11, len_bits(size), BreakpointKind::HardwareAccess)
+            }
             BreakpointKind::Software => return self.set_breakpoint(address),
         };
         ptrace::poke_user(pid, ptrace::debugreg_offset(slot), address)?;
@@ -280,7 +286,7 @@ impl LinuxPtraceBackend {
             .map(|m| format!("{}+0x{:x}", m.name, address - m.base))
             .unwrap_or_else(|| format!("0x{address:x}"));
         let mut bp = BreakpointInfo::new_software(id, address, label);
-        bp.kind = kind;
+        bp.kind = effective_kind;
         bp.size = size;
         self.breakpoints.insert(id, bp);
         self.hw_slots[slot] = Some((id, address));
