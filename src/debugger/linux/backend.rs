@@ -539,7 +539,34 @@ impl DebugBackend for LinuxPtraceBackend {
 
     fn write_memory(&mut self, address: u64, data: &[u8]) -> DbgResult<()> {
         let pid = self.pid.ok_or(DbgError::NotRunning)?;
-        ptrace::write_mem(pid, address, data)
+        ptrace::write_mem(pid, address, data)?;
+
+        // If the write overlaps an armed software breakpoint, the user's bytes
+        // just clobbered our int3. Update the saved original bytes to the new
+        // values (so read_memory shows the patch and removal restores it) and
+        // re-insert the breakpoint opcode so it stays armed.
+        let end = address + data.len() as u64;
+        let overlapping: Vec<u64> = self
+            .orig
+            .keys()
+            .copied()
+            .filter(|bp_addr| {
+                let bp_end = bp_addr + arch::BP_BYTES.len() as u64;
+                *bp_addr < end && bp_end > address
+            })
+            .collect();
+        for bp_addr in overlapping {
+            if let Some(orig) = self.orig.get_mut(&bp_addr) {
+                for (i, b) in orig.iter_mut().enumerate() {
+                    let a = bp_addr + i as u64;
+                    if a >= address && a < end {
+                        *b = data[(a - address) as usize];
+                    }
+                }
+            }
+            let _ = ptrace::write_mem(pid, bp_addr, arch::BP_BYTES);
+        }
+        Ok(())
     }
 
     fn set_breakpoint(&mut self, address: u64) -> DbgResult<BreakpointId> {
@@ -592,7 +619,11 @@ impl DebugBackend for LinuxPtraceBackend {
 
     fn remove_breakpoint(&mut self, id: BreakpointId) -> DbgResult<()> {
         if let Some(bp) = self.breakpoints.remove(&id) {
-            self.bp_by_addr.remove(&bp.address);
+            // Only drop the address map if it still points at *this* breakpoint
+            // (a hardware breakpoint may share an address with a software one).
+            if self.bp_by_addr.get(&bp.address) == Some(&id) {
+                self.bp_by_addr.remove(&bp.address);
+            }
             #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
             if let Some(slot) = self.hw_slots.iter().position(|s| matches!(s, Some((sid, _)) if *sid == id)) {
                 if let Some(pid) = self.pid {
@@ -603,13 +634,18 @@ impl DebugBackend for LinuxPtraceBackend {
                 }
                 self.hw_slots[slot] = None;
             }
-            if let (Some(pid), Some(orig)) = (self.pid, self.orig.remove(&bp.address)) {
-                if bp.enabled {
-                    let _ = ptrace::write_mem(pid, bp.address, &orig);
+            // Software-breakpoint teardown (int3 byte restore) must only run for
+            // software breakpoints — a hardware breakpoint may share an address
+            // with a software one whose saved bytes/reinsert must be preserved.
+            if bp.kind == BreakpointKind::Software {
+                if let (Some(pid), Some(orig)) = (self.pid, self.orig.remove(&bp.address)) {
+                    if bp.enabled {
+                        let _ = ptrace::write_mem(pid, bp.address, &orig);
+                    }
                 }
-            }
-            if self.pending_reinsert == Some(bp.address) {
-                self.pending_reinsert = None;
+                if self.pending_reinsert == Some(bp.address) {
+                    self.pending_reinsert = None;
+                }
             }
         }
         Ok(())
