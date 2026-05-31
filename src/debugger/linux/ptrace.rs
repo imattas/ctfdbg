@@ -9,6 +9,7 @@ use std::ffi::{c_void, CString};
 use std::fs::File;
 use std::io;
 use std::os::unix::fs::FileExt;
+use std::os::unix::io::RawFd;
 
 use libc::{c_long, pid_t, user_regs_struct};
 
@@ -168,10 +169,36 @@ pub fn write_mem(pid: pid_t, addr: u64, data: &[u8]) -> DbgResult<()> {
     Ok(())
 }
 
-/// Spawn `path` with `args`, set it up as a ptrace tracee, and return its pid.
-/// The child runs `PTRACE_TRACEME` then `execvp`; the caller waits for the
-/// initial `execve` stop.
-pub fn fork_exec(path: &str, args: &[String], cwd: Option<&str>) -> DbgResult<pid_t> {
+/// A freshly spawned, ptrace-traced child plus the parent ends of its
+/// redirected standard streams.
+pub struct SpawnedChild {
+    pub pid: pid_t,
+    /// Parent's write end of the child's stdin.
+    pub stdin_w: RawFd,
+    /// Parent's read end of the child's stdout.
+    pub stdout_r: RawFd,
+    /// Parent's read end of the child's stderr.
+    pub stderr_r: RawFd,
+}
+
+fn make_pipe() -> DbgResult<(RawFd, RawFd)> {
+    let mut fds = [0 as RawFd; 2];
+    // SAFETY: fds is a valid 2-element array.
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+        return Err(os_err("pipe"));
+    }
+    Ok((fds[0], fds[1]))
+}
+
+/// Spawn `path` with `args`/`env`, set it up as a ptrace tracee with its
+/// stdin/stdout/stderr redirected through pipes, and return the child plus the
+/// parent-side stream fds. The caller waits for the initial `execve` stop.
+pub fn fork_exec(
+    path: &str,
+    args: &[String],
+    env: &[(String, String)],
+    cwd: Option<&str>,
+) -> DbgResult<SpawnedChild> {
     let c_path = CString::new(path).map_err(|_| DbgError::InvalidArgument("path has NUL".into()))?;
     let mut argv_owned: Vec<CString> = Vec::with_capacity(args.len() + 1);
     argv_owned.push(c_path.clone());
@@ -184,13 +211,28 @@ pub fn fork_exec(path: &str, args: &[String], cwd: Option<&str>) -> DbgResult<pi
         Some(d) => Some(CString::new(d).map_err(|_| DbgError::InvalidArgument("cwd has NUL".into()))?),
         None => None,
     };
+    // Build the env CStrings before forking (no allocation in the child).
+    let mut env_pairs: Vec<(CString, CString)> = Vec::with_capacity(env.len());
+    for (k, v) in env {
+        let ck = CString::new(k.as_str()).map_err(|_| DbgError::InvalidArgument("env key has NUL".into()))?;
+        let cv = CString::new(v.as_str()).map_err(|_| DbgError::InvalidArgument("env value has NUL".into()))?;
+        env_pairs.push((ck, cv));
+    }
+
+    let (stdin_r, stdin_w) = make_pipe()?;
+    let (stdout_r, stdout_w) = make_pipe()?;
+    let (stderr_r, stderr_w) = make_pipe()?;
 
     // SAFETY: fork in a process that immediately execs in the child; between
     // fork and exec we only call async-signal-safe syscalls and use pointers
     // into buffers allocated before the fork.
     let pid = unsafe { libc::fork() };
     if pid < 0 {
-        return Err(os_err("fork"));
+        let e = os_err("fork");
+        for fd in [stdin_r, stdin_w, stdout_r, stdout_w, stderr_r, stderr_w] {
+            unsafe { libc::close(fd); }
+        }
+        return Err(e);
     }
     if pid == 0 {
         // Child.
@@ -198,6 +240,16 @@ pub fn fork_exec(path: &str, args: &[String], cwd: Option<&str>) -> DbgResult<pi
             let _ = libc::ptrace(libc::PTRACE_TRACEME as _, 0, std::ptr::null_mut::<c_void>(), std::ptr::null_mut::<c_void>());
             // Make addresses reproducible across runs for easier debugging.
             let _ = libc::personality(libc::ADDR_NO_RANDOMIZE as libc::c_ulong);
+            // Redirect standard streams to the pipe ends the child owns.
+            libc::dup2(stdin_r, 0);
+            libc::dup2(stdout_w, 1);
+            libc::dup2(stderr_w, 2);
+            for fd in [stdin_r, stdin_w, stdout_r, stdout_w, stderr_r, stderr_w] {
+                libc::close(fd);
+            }
+            for (k, v) in &env_pairs {
+                libc::setenv(k.as_ptr(), v.as_ptr(), 1);
+            }
             if let Some(d) = &c_cwd {
                 let _ = libc::chdir(d.as_ptr());
             }
@@ -206,7 +258,13 @@ pub fn fork_exec(path: &str, args: &[String], cwd: Option<&str>) -> DbgResult<pi
             libc::_exit(127);
         }
     }
-    Ok(pid)
+    // Parent: close the ends the child owns; keep the others.
+    unsafe {
+        libc::close(stdin_r);
+        libc::close(stdout_w);
+        libc::close(stderr_w);
+    }
+    Ok(SpawnedChild { pid, stdin_w, stdout_r, stderr_r })
 }
 
 /// `waitpid` wrapper returning the raw status word.

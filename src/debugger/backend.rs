@@ -22,11 +22,24 @@ pub struct DebugTarget {
     pub break_on_tls_callbacks: bool,
 }
 
+/// Sink for bytes captured from the target's stdout/stderr.
+pub type OutputSink = std::sync::Arc<dyn Fn(Vec<u8>) + Send + Sync>;
+
 /// Cross-platform debugger backend trait.
 ///
 /// Implementors run on a worker thread and own the OS-level handles.
 pub trait DebugBackend {
     fn name(&self) -> &'static str;
+
+    /// Install a sink that receives bytes written by the target to
+    /// stdout/stderr. Backends that capture output call it from reader threads.
+    /// Default: no capture.
+    fn set_output_sink(&mut self, _sink: OutputSink) {}
+
+    /// Write bytes to the target's standard input. Default: unsupported.
+    fn write_stdin(&mut self, _data: &[u8]) -> DbgResult<()> {
+        Err(DbgError::Unsupported("standard-input redirection is not supported by this backend".into()))
+    }
 
     fn state(&self) -> TargetState;
     fn pid(&self) -> Option<u32>;

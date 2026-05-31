@@ -10,10 +10,13 @@
 //! (x86-64, x86, AArch64).  The surrounding control-flow logic is shared.
 
 use std::collections::HashMap;
+use std::fs::File;
+use std::io::Read;
+use std::os::unix::io::{FromRawFd, RawFd};
 
 use libc::pid_t;
 
-use crate::debugger::backend::{DebugBackend, DebugTarget};
+use crate::debugger::backend::{DebugBackend, DebugTarget, OutputSink};
 use crate::debugger::breakpoint::{BreakpointId, BreakpointInfo, BreakpointKind};
 use crate::debugger::events::DebuggerEvent;
 use crate::debugger::modules::DebugModule;
@@ -43,6 +46,10 @@ pub struct LinuxPtraceBackend {
     /// True when we attached to an existing process (vs. launched it). Attached
     /// targets are detached, not killed, when the backend is dropped.
     attached: bool,
+    /// Sink for captured stdout/stderr (installed by the worker).
+    output_sink: Option<OutputSink>,
+    /// Parent write end of a launched target's stdin.
+    stdin: Option<File>,
     /// Hardware debug-register slots (x86 DR0–DR3): (breakpoint id, address).
     #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
     hw_slots: [Option<(BreakpointId, u64)>; 4],
@@ -67,6 +74,8 @@ impl LinuxPtraceBackend {
             pending_signal: 0,
             modules: vec![],
             attached: false,
+            output_sink: None,
+            stdin: None,
             #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
             hw_slots: [None; 4],
             #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
@@ -422,6 +431,21 @@ impl DebugBackend for LinuxPtraceBackend {
     fn name(&self) -> &'static str {
         "Linux ptrace"
     }
+
+    fn set_output_sink(&mut self, sink: OutputSink) {
+        self.output_sink = Some(sink);
+    }
+
+    fn write_stdin(&mut self, data: &[u8]) -> DbgResult<()> {
+        use std::io::Write;
+        let f = self
+            .stdin
+            .as_mut()
+            .ok_or_else(|| DbgError::Unsupported("no stdin pipe (attached target or not launched)".into()))?;
+        f.write_all(data).map_err(|e| DbgError::Other(e.to_string()))?;
+        f.flush().map_err(|e| DbgError::Other(e.to_string()))?;
+        Ok(())
+    }
     fn state(&self) -> TargetState {
         self.state
     }
@@ -440,9 +464,16 @@ impl DebugBackend for LinuxPtraceBackend {
         let args = split_args(&target.arguments);
         let cwd = target.working_directory.as_ref().map(|p| p.to_string_lossy().into_owned());
 
-        let pid = ptrace::fork_exec(&exe_str, &args, cwd.as_deref())?;
+        let child = ptrace::fork_exec(&exe_str, &args, &target.environment, cwd.as_deref())?;
+        let pid = child.pid;
         self.pid = Some(pid);
         self.attached = false;
+        // Keep the stdin write end and stream stdout/stderr to the output sink
+        // (always drain the read ends so the target never blocks on a full pipe).
+        // SAFETY: these fds are freshly created by fork_exec and owned by us.
+        self.stdin = Some(unsafe { File::from_raw_fd(child.stdin_w) });
+        spawn_output_reader(child.stdout_r, self.output_sink.clone());
+        spawn_output_reader(child.stderr_r, self.output_sink.clone());
 
         // Wait for the initial stop right after execve.
         let status = ptrace::wait(pid)?;
@@ -819,33 +850,30 @@ impl DebugBackend for LinuxPtraceBackend {
     fn stack_trace(&self, thread_id: u32) -> DbgResult<Vec<StackFrame>> {
         let pid = if thread_id != 0 { thread_id as pid_t } else { self.pid.ok_or(DbgError::NotRunning)? };
         let regs = ptrace::get_regs(pid)?;
-        let mut frames = Vec::new();
-        let mut pc = arch::pc(&regs);
-        let mut fp = arch::fp(&regs);
+        let pc = arch::pc(&regs);
+        let fp = arch::fp(&regs);
         let sp = arch::sp(&regs);
+        let ptr_size = arch::PTR_SIZE;
+        let unwound = crate::analysis::stack::frame_pointer_unwind(pc, fp, ptr_size, 64, |addr| {
+            ptrace::read_mem(pid, addr, ptr_size).ok().and_then(|b| {
+                if b.len() < ptr_size { None } else { Some(read_ptr(&b)) }
+            })
+        });
         let module_of = |addr: u64| self.modules.iter().find(|m| m.contains(addr)).map(|m| m.name.clone());
-        frames.push(StackFrame { frame_index: 0, thread_id, pc, sp, fp, function: None, module: module_of(pc) });
-        // Frame-pointer unwind: [fp] = saved fp, [fp + ptr] = return address.
-        let ptr = arch::PTR_SIZE as u64;
-        for i in 1..32u32 {
-            if fp == 0 {
-                break;
-            }
-            let Ok(saved) = ptrace::read_mem(pid, fp, arch::PTR_SIZE) else { break };
-            let Ok(ret_b) = ptrace::read_mem(pid, fp + ptr, arch::PTR_SIZE) else { break };
-            if saved.len() < arch::PTR_SIZE || ret_b.len() < arch::PTR_SIZE {
-                break;
-            }
-            let new_fp = read_ptr(&saved);
-            let ret = read_ptr(&ret_b);
-            if ret == 0 || new_fp <= fp {
-                break;
-            }
-            frames.push(StackFrame { frame_index: i, thread_id, pc: ret, sp: fp, fp: new_fp, function: None, module: module_of(ret) });
-            pc = ret;
-            fp = new_fp;
-            let _ = pc;
-        }
+        let frames = unwound
+            .iter()
+            .enumerate()
+            .map(|(i, f)| StackFrame {
+                frame_index: i as u32,
+                thread_id,
+                pc: f.pc,
+                // sp is exact only for frame 0; report the frame pointer otherwise.
+                sp: if i == 0 { sp } else { f.fp },
+                fp: f.fp,
+                function: None,
+                module: module_of(f.pc),
+            })
+            .collect();
         Ok(frames)
     }
 }
@@ -855,6 +883,28 @@ fn read_ptr(bytes: &[u8]) -> u64 {
     let n = bytes.len().min(8);
     buf[..n].copy_from_slice(&bytes[..n]);
     u64::from_le_bytes(buf)
+}
+
+/// Drain a target output pipe on a dedicated thread, forwarding bytes to the
+/// sink (or discarding them if none) until EOF. Always draining keeps the
+/// target from blocking on a full pipe.
+fn spawn_output_reader(fd: RawFd, sink: Option<OutputSink>) {
+    std::thread::spawn(move || {
+        // SAFETY: fd is a freshly created pipe read end owned exclusively here.
+        let mut f = unsafe { File::from_raw_fd(fd) };
+        let mut buf = [0u8; 8192];
+        loop {
+            match f.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if let Some(s) = &sink {
+                        s(buf[..n].to_vec());
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
 }
 
 /// Parse `/proc/<pid>/maps` into one [`DebugModule`] per backing file.

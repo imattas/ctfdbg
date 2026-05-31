@@ -118,7 +118,19 @@ pub fn execute(state: &mut AppState, line: &str) {
                     state.memory_view_address = a;
                 }
             }
-            Command::Stack => state.console_output.push("stack: see Stack panel".into()),
+            Command::Stack => {
+                if state.stack_trace.is_empty() {
+                    state.console_output.push("(no stack trace available; stop the target first)".into());
+                } else {
+                    for f in &state.stack_trace {
+                        let loc = f.module.as_deref().unwrap_or("");
+                        state.console_output.push(format!(
+                            "  #{:<2} pc=0x{:016x} sp=0x{:x} {}",
+                            f.frame_index, f.pc, f.sp, loc
+                        ));
+                    }
+                }
+            }
             Command::Threads => {
                 for t in &state.threads { state.console_output.push(format!("  TID {}", t.thread_id)); }
             }

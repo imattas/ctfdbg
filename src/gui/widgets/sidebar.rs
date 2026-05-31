@@ -15,14 +15,23 @@ pub fn activity_bar(ctx: &Context, state: &mut AppState, actions: &mut Vec<Actio
                     .on_hover_text("Toggle Debugger Sidebar");
                 if bug.clicked() { state.debugger_sidebar_open = !state.debugger_sidebar_open; }
 
-                let _ = ui.add(egui::Button::new("\u{1F50D}").min_size(egui::vec2(28.0, 28.0)))
-                    .on_hover_text("Search / navigation (placeholder)");
-                let _ = ui.add(egui::Button::new("\u{1F4E6}").min_size(egui::vec2(28.0, 28.0)))
-                    .on_hover_text("Modules (placeholder)");
+                if ui.add(egui::Button::new("\u{1F50D}").min_size(egui::vec2(28.0, 28.0)))
+                    .on_hover_text("Strings (searchable)").clicked()
+                {
+                    crate::gui::docking::ensure_panel_visible(&mut state.dock, crate::gui::docking::PanelKind::Strings);
+                }
+                if ui.add(egui::Button::new("\u{1F4E6}").min_size(egui::vec2(28.0, 28.0)))
+                    .on_hover_text("Modules").clicked()
+                {
+                    crate::gui::docking::ensure_panel_visible(&mut state.dock, crate::gui::docking::PanelKind::Modules);
+                }
 
                 ui.add_space(8.0);
-                let _ = ui.add(egui::Button::new("\u{2699}").min_size(egui::vec2(28.0, 28.0)))
-                    .on_hover_text("Settings");
+                if ui.add(egui::Button::new("\u{2699}").min_size(egui::vec2(28.0, 28.0)))
+                    .on_hover_text("Settings (Ctrl+S)").clicked()
+                {
+                    actions.push(Action::AdapterSettingsDialog);
+                }
                 if ui.input(|i| i.key_pressed(egui::Key::S) && i.modifiers.ctrl) {
                     actions.push(Action::AdapterSettingsDialog);
                 }
