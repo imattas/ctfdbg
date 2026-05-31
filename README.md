@@ -30,9 +30,11 @@ with an [`egui`](https://github.com/emilk/egui) interface.
   [`capstone`](https://github.com/capstone-rust/capstone-rs), driven by a
   Rust port of the binutils/BFD architecture registry (see
   [Architecture support](#architecture-support)) — ~80 BFD families
-  described, 13 with live decoders across both byte orders. Current-PC and
-  breakpoint highlighting, right-click breakpoint toggle, jump to IP, run to
-  here, copy address / instruction
+  described, 13 with live decoders across both byte orders. **Syntax-coloured**
+  output (mnemonics by instruction class; registers / immediates / memory
+  keywords / punctuation in operands), current-PC and breakpoint highlighting,
+  right-click breakpoint toggle, jump to IP, run to here, copy address /
+  instruction
 - PE / ELF / Mach-O / raw-shellcode parsing via [`goblin`](https://github.com/m4b/goblin),
   with security feature reporting (ASLR, DEP/NX, CFG, SafeSEH,
   HighEntropyVA) and BFD-aware ELF `e_machine` → architecture mapping

@@ -18,6 +18,26 @@ pub mod color {
     pub const CURRENT_LINE: Color32 = Color32::from_rgb(0x1f, 0x33, 0x55);
     pub const BREAKPOINT: Color32   = Color32::from_rgb(0x66, 0x1f, 0x1f);
     pub const ACCENT: Color32       = Color32::from_rgb(0x4d, 0x9d, 0xff);
+
+    // -- Disassembly syntax highlighting --------------------------------
+    /// Control-flow mnemonics (jmp/call/ret/syscall/branches).
+    pub const MN_FLOW: Color32   = Color32::from_rgb(0xff, 0x7b, 0x72);
+    /// Stack mnemonics (push/pop/enter/leave).
+    pub const MN_STACK: Color32  = Color32::from_rgb(0xd2, 0xa8, 0xff);
+    /// Data-movement mnemonics (mov/lea/ldr/str/...).
+    pub const MN_DATA: Color32   = Color32::from_rgb(0x79, 0xc0, 0xff);
+    /// Arithmetic / logic / compare mnemonics.
+    pub const MN_ARITH: Color32  = Color32::from_rgb(0x7e, 0xe7, 0x87);
+    /// Any other mnemonic.
+    pub const MN_DEFAULT: Color32 = Color32::from_rgb(0xe8, 0xe8, 0xe8);
+    /// Registers in operands.
+    pub const REGISTER: Color32  = Color32::from_rgb(0xff, 0xcb, 0x6b);
+    /// Immediate / numeric operands.
+    pub const IMMEDIATE: Color32 = Color32::from_rgb(0xf7, 0x8c, 0x6c);
+    /// Memory-size keywords (ptr/qword/byte/...).
+    pub const MEM_KW: Color32    = Color32::from_rgb(0x56, 0xd4, 0xdd);
+    /// Punctuation ([], +, *, commas).
+    pub const PUNCT: Color32     = Color32::from_rgb(0x9a, 0x9f, 0xa8);
 }
 
 pub fn install(ctx: &egui::Context) {
