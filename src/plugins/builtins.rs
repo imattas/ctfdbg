@@ -733,11 +733,38 @@ impl Plugin for SyscallSitesPlugin {
 
 // ============================================================ red team / RE ==
 
-/// Slice of the first executable section: (bytes, virtual_address, arch).
-fn first_exec_section(state: &AppState) -> Option<(Vec<u8>, u64, crate::target::arch::Architecture)> {
+type SectionBytes = (Vec<u8>, u64, crate::target::arch::Architecture);
+
+/// Every executable section as (bytes, virtual_address, arch).
+fn all_exec_sections(state: &AppState) -> Vec<SectionBytes> {
+    let (Some(info), Some(bytes)) = (state.binary.as_ref(), state.binary_bytes.as_ref()) else {
+        return vec![];
+    };
+    info.sections
+        .iter()
+        .filter(|s| s.executable)
+        .filter_map(|s| {
+            let start = s.file_offset as usize;
+            let end = (s.file_offset + s.file_size) as usize;
+            if start < end && end <= bytes.len() {
+                Some((bytes[start..end].to_vec(), s.virtual_address, info.architecture))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// The executable section that contains `addr` (falling back to the first).
+fn exec_section_containing(state: &AppState, addr: u64) -> Option<SectionBytes> {
     let info = state.binary.as_ref()?;
     let bytes = state.binary_bytes.as_ref()?;
-    let sec = info.sections.iter().find(|s| s.executable)?;
+    let sec = info
+        .sections
+        .iter()
+        .filter(|s| s.executable)
+        .find(|s| addr >= s.virtual_address && addr < s.virtual_address + s.virtual_size.max(s.file_size))
+        .or_else(|| info.sections.iter().find(|s| s.executable))?;
     let start = sec.file_offset as usize;
     let end = (sec.file_offset + sec.file_size) as usize;
     if start >= end || end > bytes.len() {
@@ -851,17 +878,24 @@ impl Plugin for RopChainPlugin {
     fn run(&self, state: &AppState, _arg: Option<&str>) -> PluginOutput {
         use crate::target::arch::Architecture;
         let mut out = PluginOutput::default();
-        let Some((bytes, base, arch)) = first_exec_section(state) else {
+        let secs = all_exec_sections(state);
+        let Some(&(_, _, arch)) = secs.first() else {
             return out.line("[!] no executable section / binary loaded");
         };
         if !matches!(arch, Architecture::X86_64 | Architecture::Auto) {
             return out.line("[!] ROP chain builder currently targets x86-64 only");
         }
-        // Discover pop gadgets + a syscall site.
-        let pops = crate::pwn::gadget::pop_reg_gadgets(&bytes, base, Architecture::X86_64).unwrap_or_default();
+        // Discover pop gadgets + a syscall site across every executable section.
+        let mut pops: Vec<(u64, String)> = Vec::new();
+        let mut syscall: Option<u64> = None;
+        for (bytes, base, _) in &secs {
+            pops.extend(crate::pwn::gadget::pop_reg_gadgets(bytes, *base, Architecture::X86_64).unwrap_or_default());
+            if syscall.is_none() {
+                syscall = crate::pwn::gadget::syscall_sites(bytes, *base)
+                    .into_iter().find(|s| s.kind == "syscall").map(|s| s.address);
+            }
+        }
         let find_pop = |reg: &str| pops.iter().find(|(_, r)| r == reg).map(|(a, _)| *a);
-        let syscall = crate::pwn::gadget::syscall_sites(&bytes, base)
-            .into_iter().find(|s| s.kind == "syscall").map(|s| s.address);
         // Find "/bin/sh" anywhere in the file image.
         let binsh = state.binary_bytes.as_ref().and_then(|file| {
             let needle = b"/bin/sh";
@@ -1036,13 +1070,17 @@ impl Plugin for XrefPlugin {
         let Some(target) = arg.and_then(parse_num) else {
             return PluginOutput::default().line("[!] usage: xref <addr>");
         };
-        let Some((bytes, base, arch)) = first_exec_section(state) else {
+        let secs = all_exec_sections(state);
+        if secs.is_empty() {
             return PluginOutput::default().line("[!] no executable section / binary loaded");
-        };
-        let all = match crate::analysis::xref::find_all(&bytes, base, arch) {
-            Ok(v) => v,
-            Err(e) => return PluginOutput::default().line(format!("[!] {e}")),
-        };
+        }
+        // Collect references across every executable section.
+        let mut all = Vec::new();
+        for (bytes, base, arch) in &secs {
+            if let Ok(v) = crate::analysis::xref::find_all(bytes, *base, *arch) {
+                all.extend(v);
+            }
+        }
         let hits = crate::analysis::xref::to_address(&all, target);
         let mut out = PluginOutput::default().line(format!("{} xref(s) to 0x{target:x}:", hits.len()));
         for x in hits.iter().take(100) {
@@ -1066,7 +1104,7 @@ impl Plugin for CfgPlugin {
         let Some(addr) = arg.and_then(parse_num) else {
             return PluginOutput::default().line("[!] usage: cfg <addr>");
         };
-        let Some((bytes, base, arch)) = first_exec_section(state) else {
+        let Some((bytes, base, arch)) = exec_section_containing(state, addr) else {
             return PluginOutput::default().line("[!] no executable section / binary loaded");
         };
         let all = match crate::pwn::asm::disasm_all(arch, base, &bytes) {
@@ -1106,13 +1144,16 @@ impl Plugin for CallGraphPlugin {
     }
     fn run(&self, state: &AppState, arg: Option<&str>) -> PluginOutput {
         let limit = arg.and_then(parse_num_usize).unwrap_or(100);
-        let Some((bytes, base, arch)) = first_exec_section(state) else {
+        let secs = all_exec_sections(state);
+        if secs.is_empty() {
             return PluginOutput::default().line("[!] no executable section / binary loaded");
-        };
-        let all = match crate::analysis::xref::find_all(&bytes, base, arch) {
-            Ok(v) => v,
-            Err(e) => return PluginOutput::default().line(format!("[!] {e}")),
-        };
+        }
+        let mut all = Vec::new();
+        for (bytes, base, arch) in &secs {
+            if let Ok(v) = crate::analysis::xref::find_all(bytes, *base, *arch) {
+                all.extend(v);
+            }
+        }
         let calls: Vec<_> = all.iter().filter(|x| x.kind == crate::analysis::xref::XrefKind::Call).collect();
         let mut out = PluginOutput::default().line(format!("{} call edge(s):", calls.len()));
         for x in calls.iter().take(limit) {

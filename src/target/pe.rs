@@ -14,7 +14,8 @@ pub fn parse_pe(bytes: &[u8], path: Option<std::path::PathBuf>) -> DbgResult<Bin
         0x8664 => Architecture::X86_64,           // IMAGE_FILE_MACHINE_AMD64
         0x14c => Architecture::X86,               // I386
         0xaa64 => Architecture::AArch64,          // ARM64
-        0x1c0 | 0x1c4 => Architecture::Arm,       // ARM / ARMNT (Thumb-2)
+        0x1c4 => Architecture::Thumb,             // ARMNT (Thumb-2)
+        0x1c0 => Architecture::Arm,               // ARM (little-endian)
         0x5064 => Architecture::Riscv64,          // RISCV64
         0x5032 => Architecture::Riscv32,          // RISCV32
         _ => if pe.is_64 { Architecture::X86_64 } else { Architecture::X86 },
