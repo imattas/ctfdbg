@@ -522,10 +522,19 @@ impl DebugBackend for LinuxPtraceBackend {
         }
         #[cfg(not(any(target_arch = "x86_64", target_arch = "x86")))]
         {
-            // No debug-register marshalling on this arch yet: an execute
-            // hardware breakpoint behaves identically to a software one.
-            let _ = (kind, size);
-            self.set_breakpoint(address)
+            // No debug-register marshalling on this arch yet. An execute
+            // hardware breakpoint behaves identically to a software one, but a
+            // data watchpoint must NOT plant a breakpoint instruction into the
+            // watched data (that would corrupt the tracee and never trap).
+            let _ = size;
+            match kind {
+                BreakpointKind::HardwareExecute | BreakpointKind::Software => self.set_breakpoint(address),
+                BreakpointKind::HardwareRead | BreakpointKind::HardwareWrite | BreakpointKind::HardwareAccess => {
+                    Err(DbgError::Unsupported(
+                        "data watchpoints require hardware debug registers, not yet programmed on this architecture".into(),
+                    ))
+                }
+            }
         }
     }
 
