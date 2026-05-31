@@ -14,7 +14,9 @@ mod linux_x86_64 {
     use std::path::{Path, PathBuf};
 
     fn target(path: &str) -> DebugTarget {
-        DebugTarget { executable: Some(PathBuf::from(path)), ..Default::default() }
+        // break_on_entry so launch leaves the target stopped at its entry point
+        // (without it, the backend resumes and /bin/true would run to exit).
+        DebugTarget { executable: Some(PathBuf::from(path)), break_on_entry: true, ..Default::default() }
     }
 
     #[test]

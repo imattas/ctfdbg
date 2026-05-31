@@ -441,6 +441,14 @@ impl DebugBackend for LinuxPtraceBackend {
             self.last_stop_addr = arch::pc(&regs);
         }
         self.refresh_modules();
+
+        // Honour `break_on_entry`: when it is not requested, resume past the
+        // initial exec stop so the target runs (matching the Windows backend),
+        // rather than forcing the user to continue manually every session.
+        if !target.break_on_entry {
+            ptrace::cont(pid, 0)?;
+            self.state = TargetState::Running;
+        }
         Ok(())
     }
 
@@ -727,8 +735,16 @@ impl DebugBackend for LinuxPtraceBackend {
             let original = ptrace::read_mem(pid, address, arch::BP_BYTES.len())?;
             ptrace::write_mem(pid, address, arch::BP_BYTES)?;
             self.orig.insert(address, original);
-        } else if let Some(orig) = self.orig.remove(&address) {
-            ptrace::write_mem(pid, address, &orig)?;
+        } else {
+            if let Some(orig) = self.orig.remove(&address) {
+                ptrace::write_mem(pid, address, &orig)?;
+            }
+            // If we are stopped on this breakpoint, drop the pending re-arm so
+            // the next resume does not re-install an int3 for a now-disabled
+            // breakpoint (which would leave an int3 with no saved original).
+            if self.pending_reinsert == Some(address) {
+                self.pending_reinsert = None;
+            }
         }
         if let Some(bp) = self.breakpoints.get_mut(&id) {
             bp.enabled = enabled;
