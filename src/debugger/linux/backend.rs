@@ -40,6 +40,9 @@ pub struct LinuxPtraceBackend {
     /// Signal to deliver to the tracee on the next resume (0 = none).
     pending_signal: i32,
     modules: Vec<DebugModule>,
+    /// True when we attached to an existing process (vs. launched it). Attached
+    /// targets are detached, not killed, when the backend is dropped.
+    attached: bool,
     /// Hardware debug-register slots (x86 DR0–DR3): (breakpoint id, address).
     #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
     hw_slots: [Option<(BreakpointId, u64)>; 4],
@@ -63,6 +66,7 @@ impl LinuxPtraceBackend {
             pending_reinsert: None,
             pending_signal: 0,
             modules: vec![],
+            attached: false,
             #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
             hw_slots: [None; 4],
             #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
@@ -137,6 +141,17 @@ impl LinuxPtraceBackend {
                     }
                 }
             }
+            WaitOutcome::Stopped(sig) if sig == libc::SIGSTOP => {
+                // A stop (typically debugger-induced via `pause()`). Do NOT
+                // record it as pending: re-delivering SIGSTOP on the next
+                // resume would immediately stop the target again.
+                let pc = ptrace::get_regs(pid).map(|r| arch::pc(&r)).unwrap_or(0);
+                self.state = TargetState::Stopped;
+                self.last_stop_tid = pid as u32;
+                self.last_stop_addr = pc;
+                self.pending_signal = 0;
+                Ok(DebuggerEvent::Stopped { reason: "paused".into(), thread_id: pid as u32, address: pc })
+            }
             WaitOutcome::Stopped(sig) => {
                 // A real signal (SIGSEGV, SIGILL, ...). Remember it so it is
                 // delivered to the tracee when the user resumes.
@@ -192,8 +207,16 @@ impl LinuxPtraceBackend {
                 }
                 _ => {}
             }
-            // Re-arm the breakpoint.
+            // Re-arm the breakpoint now the original instruction has executed.
             ptrace::write_mem(pid, addr, arch::BP_BYTES)?;
+            // If single-stepping the restored instruction itself raised a real
+            // signal (SIGSEGV/SIGILL/...), surface that fault rather than
+            // masking it by re-arming and continuing.
+            if let WaitOutcome::Stopped(s) = ptrace::decode_status(status) {
+                if s != libc::SIGTRAP {
+                    return self.interpret(status, step);
+                }
+            }
             if step {
                 // The step-over instruction is exactly the user's single step.
                 let regs = ptrace::get_regs(pid)?;
@@ -304,11 +327,21 @@ impl Default for LinuxPtraceBackend {
 
 impl Drop for LinuxPtraceBackend {
     fn drop(&mut self) {
-        if let Some(pid) = self.pid {
-            if !matches!(self.state, TargetState::Exited | TargetState::NotStarted) {
-                ptrace::send_signal(pid, libc::SIGKILL);
-                let _ = ptrace::wait(pid);
+        let Some(pid) = self.pid else { return };
+        if matches!(self.state, TargetState::Exited | TargetState::NotStarted) {
+            return;
+        }
+        if self.attached {
+            // Leave a process we attached to running: restore any patched
+            // breakpoints and detach instead of killing it.
+            for (addr, orig) in self.orig.drain() {
+                let _ = ptrace::write_mem(pid, addr, &orig);
             }
+            let _ = ptrace::detach(pid, 0);
+        } else {
+            // We launched this child: tear it down.
+            ptrace::send_signal(pid, libc::SIGKILL);
+            let _ = ptrace::wait(pid);
         }
     }
 }
@@ -339,6 +372,7 @@ impl DebugBackend for LinuxPtraceBackend {
 
         let pid = ptrace::fork_exec(&exe_str, &args, cwd.as_deref())?;
         self.pid = Some(pid);
+        self.attached = false;
 
         // Wait for the initial stop right after execve.
         let status = ptrace::wait(pid)?;
@@ -367,8 +401,10 @@ impl DebugBackend for LinuxPtraceBackend {
         if let WaitOutcome::Exited(_) | WaitOutcome::Signalled(_) = ptrace::decode_status(status) {
             return Err(DbgError::Other("process exited during attach".into()));
         }
-        let _ = ptrace::set_options(pid, libc::PTRACE_O_EXITKILL);
+        // Note: we deliberately do NOT set PTRACE_O_EXITKILL here — an attached
+        // process must outlive the debugger (see Drop, which detaches it).
         self.pid = Some(pid);
+        self.attached = true;
         self.state = TargetState::Stopped;
         self.last_stop_tid = pid as u32;
         if let Ok(regs) = ptrace::get_regs(pid) {
