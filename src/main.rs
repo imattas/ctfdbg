@@ -2,11 +2,7 @@
 //! a script/command-only mode.
 
 use clap::Parser;
-use ctfdbg::{
-    cli::Cli,
-    config::DebugConfig,
-    gui,
-};
+use ctfdbg::{cli::Cli, config::DebugConfig};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 fn main() -> anyhow::Result<()> {
@@ -24,11 +20,14 @@ fn main() -> anyhow::Result<()> {
 
     let cfg = DebugConfig::from_cli(&cli);
 
-    // Headless / script mode
-    if cli.headless {
-        return ctfdbg::commands::executor::run_headless(cfg, cli.script.as_deref());
+    // GUI mode (only when built with the `gui` feature and not asked for headless).
+    #[cfg(feature = "gui")]
+    {
+        if !cli.headless {
+            return ctfdbg::gui::run(cfg).map_err(|e| anyhow::anyhow!("GUI error: {e}"));
+        }
     }
 
-    // GUI mode
-    gui::run(cfg).map_err(|e| anyhow::anyhow!("GUI error: {e}"))
+    // Headless / script mode (also the only mode when built without `gui`).
+    ctfdbg::commands::executor::run_headless(cfg, cli.script.as_deref())
 }

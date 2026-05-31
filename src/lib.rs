@@ -8,7 +8,9 @@ pub mod commands;
 pub mod config;
 pub mod debugger;
 pub mod error;
+#[cfg(feature = "gui")]
 pub mod gui;
+#[cfg(feature = "gui")]
 pub mod plugins;
 pub mod pwn;
 pub mod target;
