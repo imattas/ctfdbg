@@ -450,7 +450,17 @@ impl DebugBackend for LinuxPtraceBackend {
 
     fn pause(&mut self) -> DbgResult<DebuggerEvent> {
         let pid = self.require_running()?;
-        // Stop the (running) tracee; it will report a SIGSTOP group-stop.
+        // If the tracee is already stopped, sending SIGSTOP and then blocking
+        // in waitpid would hang forever (a stopped tracee reports no new wait
+        // status until resumed). Just report the current stop instead.
+        if self.state != TargetState::Running {
+            return Ok(DebuggerEvent::Stopped {
+                reason: "already stopped".into(),
+                thread_id: self.last_stop_tid,
+                address: self.last_stop_addr,
+            });
+        }
+        // Stop the running tracee; it will report a SIGSTOP group-stop.
         ptrace::send_signal(pid, libc::SIGSTOP);
         let status = ptrace::wait(pid)?;
         self.interpret(status, false)
