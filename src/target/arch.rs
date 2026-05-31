@@ -9,8 +9,22 @@ pub enum Architecture {
     X86,
     X86_64,
     Arm,
+    Thumb,
     AArch64,
+    Riscv32,
     Riscv64,
+    Mips,
+    Mips64,
+    PowerPc,
+    PowerPc64,
+    Sparc,
+    Sparc64,
+    SystemZ,
+    M68k,
+    SuperH,
+    /// Architecture recognised at the descriptor level (see [`crate::target::bfd`])
+    /// but without a live debugger/register model in this build.
+    Unsupported,
 }
 
 impl Architecture {
@@ -19,17 +33,34 @@ impl Architecture {
             "x86" | "i386" | "i686" => Self::X86,
             "x86_64" | "x64" | "amd64" => Self::X86_64,
             "arm" | "arm32" | "armv7" => Self::Arm,
+            "thumb" | "thumb2" => Self::Thumb,
             "aarch64" | "arm64" => Self::AArch64,
-            "riscv64" | "riscv" => Self::Riscv64,
-            _ => Self::Auto,
+            "riscv32" | "rv32" => Self::Riscv32,
+            "riscv64" | "riscv" | "rv64" => Self::Riscv64,
+            "mips" | "mips32" | "mipsel" | "mipseb" => Self::Mips,
+            "mips64" | "mips64el" => Self::Mips64,
+            "ppc" | "powerpc" | "ppc32" => Self::PowerPc,
+            "ppc64" | "powerpc64" | "ppc64le" => Self::PowerPc64,
+            "sparc" | "sparc32" => Self::Sparc,
+            "sparc64" | "sparcv9" => Self::Sparc64,
+            "s390" | "s390x" | "systemz" | "sysz" => Self::SystemZ,
+            "m68k" | "68000" | "68040" => Self::M68k,
+            "sh" | "sh4" | "superh" => Self::SuperH,
+            // Fall back to the broader BFD table before giving up.
+            other => crate::target::bfd::lookup(other)
+                .map(|a| a.arch)
+                .unwrap_or(Self::Auto),
         }
     }
 
     pub fn pointer_size(self) -> usize {
         match self {
-            Self::X86 | Self::Arm => 4,
-            Self::X86_64 | Self::AArch64 | Self::Riscv64 => 8,
+            Self::X86 | Self::Arm | Self::Thumb | Self::Riscv32 | Self::Mips
+            | Self::PowerPc | Self::Sparc | Self::SuperH | Self::M68k => 4,
+            Self::X86_64 | Self::AArch64 | Self::Riscv64 | Self::Mips64
+            | Self::PowerPc64 | Self::Sparc64 | Self::SystemZ => 8,
             Self::Auto => 8,
+            Self::Unsupported => 8,
         }
     }
 
@@ -43,8 +74,20 @@ impl Architecture {
             Self::X86 => "x86",
             Self::X86_64 => "x86_64",
             Self::Arm => "arm",
+            Self::Thumb => "thumb",
             Self::AArch64 => "aarch64",
+            Self::Riscv32 => "riscv32",
             Self::Riscv64 => "riscv64",
+            Self::Mips => "mips",
+            Self::Mips64 => "mips64",
+            Self::PowerPc => "powerpc",
+            Self::PowerPc64 => "powerpc64",
+            Self::Sparc => "sparc",
+            Self::Sparc64 => "sparc64",
+            Self::SystemZ => "s390x",
+            Self::M68k => "m68k",
+            Self::SuperH => "sh",
+            Self::Unsupported => "unsupported",
         }
     }
 }
@@ -72,9 +115,10 @@ impl Endian {
     }
 
     pub fn for_arch(arch: Architecture) -> Self {
-        // All currently-supported targets are little-endian by default.
-        let _ = arch;
-        Self::Little
+        // Use the BFD descriptor's default byte order when we have one.
+        crate::target::bfd::for_architecture(arch)
+            .map(|a| a.byte_order.to_endian())
+            .unwrap_or(Self::Little)
     }
 }
 
@@ -157,14 +201,149 @@ impl Architecture {
                 RegisterMeta { name: "pc",  role: ProgramCounter, bit_width: 32 },
             ],
             Architecture::Riscv64 => &[
-                RegisterMeta { name: "ra",  role: General, bit_width: 64 },
-                RegisterMeta { name: "sp",  role: StackPointer, bit_width: 64 },
-                RegisterMeta { name: "gp",  role: General, bit_width: 64 },
-                RegisterMeta { name: "tp",  role: General, bit_width: 64 },
-                RegisterMeta { name: "a0",  role: Argument(0), bit_width: 64 },
-                RegisterMeta { name: "a1",  role: Argument(1), bit_width: 64 },
+                RegisterMeta { name: "ra", role: General, bit_width: 64 },
+                RegisterMeta { name: "sp", role: StackPointer, bit_width: 64 },
+                RegisterMeta { name: "gp", role: General, bit_width: 64 },
+                RegisterMeta { name: "tp", role: General, bit_width: 64 },
+                RegisterMeta { name: "s0", role: FramePointer, bit_width: 64 },
+                RegisterMeta { name: "a0", role: Argument(0), bit_width: 64 },
+                RegisterMeta { name: "a1", role: Argument(1), bit_width: 64 },
+                RegisterMeta { name: "a2", role: Argument(2), bit_width: 64 },
+                RegisterMeta { name: "a3", role: Argument(3), bit_width: 64 },
+                RegisterMeta { name: "a4", role: Argument(4), bit_width: 64 },
+                RegisterMeta { name: "a5", role: Argument(5), bit_width: 64 },
+                RegisterMeta { name: "a6", role: Argument(6), bit_width: 64 },
+                RegisterMeta { name: "a7", role: Argument(7), bit_width: 64 },
+                RegisterMeta { name: "pc", role: ProgramCounter, bit_width: 64 },
+            ],
+            Architecture::Riscv32 => &[
+                RegisterMeta { name: "ra", role: General, bit_width: 32 },
+                RegisterMeta { name: "sp", role: StackPointer, bit_width: 32 },
+                RegisterMeta { name: "gp", role: General, bit_width: 32 },
+                RegisterMeta { name: "s0", role: FramePointer, bit_width: 32 },
+                RegisterMeta { name: "a0", role: Argument(0), bit_width: 32 },
+                RegisterMeta { name: "a1", role: Argument(1), bit_width: 32 },
+                RegisterMeta { name: "a2", role: Argument(2), bit_width: 32 },
+                RegisterMeta { name: "a3", role: Argument(3), bit_width: 32 },
+                RegisterMeta { name: "pc", role: ProgramCounter, bit_width: 32 },
+            ],
+            Architecture::Thumb => &[
+                RegisterMeta { name: "r0",  role: Argument(0), bit_width: 32 },
+                RegisterMeta { name: "r1",  role: Argument(1), bit_width: 32 },
+                RegisterMeta { name: "r2",  role: Argument(2), bit_width: 32 },
+                RegisterMeta { name: "r3",  role: Argument(3), bit_width: 32 },
+                RegisterMeta { name: "r7",  role: FramePointer, bit_width: 32 },
+                RegisterMeta { name: "sp",  role: StackPointer, bit_width: 32 },
+                RegisterMeta { name: "lr",  role: General, bit_width: 32 },
+                RegisterMeta { name: "pc",  role: ProgramCounter, bit_width: 32 },
+            ],
+            Architecture::Mips | Architecture::Mips64 => {
+                // o32/n64 share these argument-register names; width differs only
+                // in how the debugger renders them, so we report the common set.
+                if matches!(self, Architecture::Mips64) {
+                    &[
+                        RegisterMeta { name: "zero", role: General, bit_width: 64 },
+                        RegisterMeta { name: "v0", role: ReturnValue, bit_width: 64 },
+                        RegisterMeta { name: "a0", role: Argument(0), bit_width: 64 },
+                        RegisterMeta { name: "a1", role: Argument(1), bit_width: 64 },
+                        RegisterMeta { name: "a2", role: Argument(2), bit_width: 64 },
+                        RegisterMeta { name: "a3", role: Argument(3), bit_width: 64 },
+                        RegisterMeta { name: "gp", role: General, bit_width: 64 },
+                        RegisterMeta { name: "sp", role: StackPointer, bit_width: 64 },
+                        RegisterMeta { name: "fp", role: FramePointer, bit_width: 64 },
+                        RegisterMeta { name: "ra", role: General, bit_width: 64 },
+                        RegisterMeta { name: "pc", role: ProgramCounter, bit_width: 64 },
+                    ]
+                } else {
+                    &[
+                        RegisterMeta { name: "zero", role: General, bit_width: 32 },
+                        RegisterMeta { name: "v0", role: ReturnValue, bit_width: 32 },
+                        RegisterMeta { name: "a0", role: Argument(0), bit_width: 32 },
+                        RegisterMeta { name: "a1", role: Argument(1), bit_width: 32 },
+                        RegisterMeta { name: "a2", role: Argument(2), bit_width: 32 },
+                        RegisterMeta { name: "a3", role: Argument(3), bit_width: 32 },
+                        RegisterMeta { name: "gp", role: General, bit_width: 32 },
+                        RegisterMeta { name: "sp", role: StackPointer, bit_width: 32 },
+                        RegisterMeta { name: "fp", role: FramePointer, bit_width: 32 },
+                        RegisterMeta { name: "ra", role: General, bit_width: 32 },
+                        RegisterMeta { name: "pc", role: ProgramCounter, bit_width: 32 },
+                    ]
+                }
+            }
+            Architecture::PowerPc => &[
+                RegisterMeta { name: "r1", role: StackPointer, bit_width: 32 },
+                RegisterMeta { name: "r3", role: Argument(0), bit_width: 32 },
+                RegisterMeta { name: "r4", role: Argument(1), bit_width: 32 },
+                RegisterMeta { name: "r5", role: Argument(2), bit_width: 32 },
+                RegisterMeta { name: "r6", role: Argument(3), bit_width: 32 },
+                RegisterMeta { name: "r31", role: FramePointer, bit_width: 32 },
+                RegisterMeta { name: "lr", role: General, bit_width: 32 },
+                RegisterMeta { name: "ctr", role: General, bit_width: 32 },
+                RegisterMeta { name: "pc", role: ProgramCounter, bit_width: 32 },
+            ],
+            Architecture::PowerPc64 => &[
+                RegisterMeta { name: "r1", role: StackPointer, bit_width: 64 },
+                RegisterMeta { name: "r3", role: Argument(0), bit_width: 64 },
+                RegisterMeta { name: "r4", role: Argument(1), bit_width: 64 },
+                RegisterMeta { name: "r5", role: Argument(2), bit_width: 64 },
+                RegisterMeta { name: "r6", role: Argument(3), bit_width: 64 },
+                RegisterMeta { name: "r31", role: FramePointer, bit_width: 64 },
+                RegisterMeta { name: "lr", role: General, bit_width: 64 },
+                RegisterMeta { name: "ctr", role: General, bit_width: 64 },
+                RegisterMeta { name: "pc", role: ProgramCounter, bit_width: 64 },
+            ],
+            Architecture::Sparc => &[
+                RegisterMeta { name: "g0", role: General, bit_width: 32 },
+                RegisterMeta { name: "o0", role: Argument(0), bit_width: 32 },
+                RegisterMeta { name: "o1", role: Argument(1), bit_width: 32 },
+                RegisterMeta { name: "o2", role: Argument(2), bit_width: 32 },
+                RegisterMeta { name: "sp", role: StackPointer, bit_width: 32 },
+                RegisterMeta { name: "fp", role: FramePointer, bit_width: 32 },
+                RegisterMeta { name: "pc", role: ProgramCounter, bit_width: 32 },
+            ],
+            Architecture::Sparc64 => &[
+                RegisterMeta { name: "g0", role: General, bit_width: 64 },
+                RegisterMeta { name: "o0", role: Argument(0), bit_width: 64 },
+                RegisterMeta { name: "o1", role: Argument(1), bit_width: 64 },
+                RegisterMeta { name: "o2", role: Argument(2), bit_width: 64 },
+                RegisterMeta { name: "sp", role: StackPointer, bit_width: 64 },
+                RegisterMeta { name: "fp", role: FramePointer, bit_width: 64 },
+                RegisterMeta { name: "pc", role: ProgramCounter, bit_width: 64 },
+            ],
+            Architecture::SystemZ => &[
+                RegisterMeta { name: "r0",  role: General, bit_width: 64 },
+                RegisterMeta { name: "r1",  role: General, bit_width: 64 },
+                RegisterMeta { name: "r2",  role: Argument(0), bit_width: 64 },
+                RegisterMeta { name: "r3",  role: Argument(1), bit_width: 64 },
+                RegisterMeta { name: "r4",  role: Argument(2), bit_width: 64 },
+                RegisterMeta { name: "r5",  role: Argument(3), bit_width: 64 },
+                RegisterMeta { name: "r11", role: FramePointer, bit_width: 64 },
+                RegisterMeta { name: "r14", role: General, bit_width: 64 },
+                RegisterMeta { name: "r15", role: StackPointer, bit_width: 64 },
                 RegisterMeta { name: "pc",  role: ProgramCounter, bit_width: 64 },
             ],
+            Architecture::M68k => &[
+                RegisterMeta { name: "d0", role: ReturnValue, bit_width: 32 },
+                RegisterMeta { name: "d1", role: General, bit_width: 32 },
+                RegisterMeta { name: "d2", role: General, bit_width: 32 },
+                RegisterMeta { name: "a0", role: General, bit_width: 32 },
+                RegisterMeta { name: "a1", role: General, bit_width: 32 },
+                RegisterMeta { name: "a6", role: FramePointer, bit_width: 32 },
+                RegisterMeta { name: "a7", role: StackPointer, bit_width: 32 },
+                RegisterMeta { name: "pc", role: ProgramCounter, bit_width: 32 },
+            ],
+            Architecture::SuperH => &[
+                RegisterMeta { name: "r0",  role: ReturnValue, bit_width: 32 },
+                RegisterMeta { name: "r4",  role: Argument(0), bit_width: 32 },
+                RegisterMeta { name: "r5",  role: Argument(1), bit_width: 32 },
+                RegisterMeta { name: "r6",  role: Argument(2), bit_width: 32 },
+                RegisterMeta { name: "r7",  role: Argument(3), bit_width: 32 },
+                RegisterMeta { name: "r14", role: FramePointer, bit_width: 32 },
+                RegisterMeta { name: "r15", role: StackPointer, bit_width: 32 },
+                RegisterMeta { name: "pr",  role: General, bit_width: 32 },
+                RegisterMeta { name: "pc",  role: ProgramCounter, bit_width: 32 },
+            ],
+            Architecture::Unsupported => &[],
         }
     }
 }

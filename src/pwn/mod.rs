@@ -1,7 +1,9 @@
 pub mod asm;
 pub mod calling_convention;
 pub mod cyclic;
+pub mod encoding;
 pub mod fmtstr;
+pub mod gadget;
 pub mod hexdump;
 pub mod packing;
 pub mod search;

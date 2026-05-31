@@ -240,8 +240,7 @@ impl Plugin for FmtStringProbePlugin {
     fn run(&self, state: &AppState, arg: Option<&str>) -> PluginOutput {
         let count: usize = arg.and_then(parse_num_usize).unwrap_or(20);
         let bits: u8 = match state.binary.as_ref().map(|b| b.architecture) {
-            Some(crate::target::arch::Architecture::X86_64) => 64,
-            Some(crate::target::arch::Architecture::AArch64) => 64,
+            Some(arch) if arch.is_64bit() => 64,
             _ => 32,
         };
         PluginOutput::default()
@@ -290,6 +289,443 @@ impl Plugin for ShellcodeListPlugin {
             let hex: String = sc.bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join("");
             out = out.line(format!("{:<22} [{} / {}] {} ({} bytes)", sc.name, sc.arch, sc.os, sc.description, sc.bytes.len()));
             out = out.line(format!("  bytes: {hex}"));
+        }
+        out
+    }
+}
+
+// ----------------------------------------------------- Architecture / Rev --
+
+pub struct ArchListPlugin;
+impl Plugin for ArchListPlugin {
+    fn meta(&self) -> PluginMeta {
+        PluginMeta {
+            id: "arch-list",
+            name: "List Architectures (BFD)",
+            description: "List the binutils/BFD architecture set ctfdbg recognises. Arg: optional name filter.",
+            category: PluginCategory::Rev,
+        }
+    }
+    fn run(&self, _state: &AppState, arg: Option<&str>) -> PluginOutput {
+        use crate::target::bfd;
+        let filter = arg.unwrap_or("").trim().to_ascii_lowercase();
+        let mut out = PluginOutput::default();
+        out = out.line(format!(
+            "{} architecture families described, {} with a live disassembler:",
+            bfd::count(),
+            bfd::disassemblable_count()
+        ));
+        for a in bfd::ARCHS {
+            if !filter.is_empty()
+                && !a.name.to_ascii_lowercase().contains(&filter)
+                && !a.printable.to_ascii_lowercase().contains(&filter)
+            {
+                continue;
+            }
+            out = out.line(format!(
+                "{:<16} {:<30} {:>2}/{:>2} bit {:<7} {}",
+                a.name,
+                a.printable,
+                a.bits_per_word,
+                a.bits_per_address,
+                a.byte_order.name(),
+                if a.has_disassembler() { "[disasm]" } else { "[descriptor]" },
+            ));
+        }
+        out
+    }
+}
+
+pub struct ArchInfoPlugin;
+impl Plugin for ArchInfoPlugin {
+    fn meta(&self) -> PluginMeta {
+        PluginMeta {
+            id: "arch-info",
+            name: "Architecture Info",
+            description: "Describe a BFD architecture by name/alias. Arg: e.g. 'mips64el', 'ppc64', 'sparc:v9'.",
+            category: PluginCategory::Rev,
+        }
+    }
+    fn run(&self, _state: &AppState, arg: Option<&str>) -> PluginOutput {
+        use crate::target::bfd;
+        let Some(name) = arg.map(str::trim).filter(|s| !s.is_empty()) else {
+            return PluginOutput::default().line("[!] usage: arch-info <name|alias>");
+        };
+        let Some(a) = bfd::lookup(name) else {
+            return PluginOutput::default().line(format!("[!] unknown architecture: {name}"));
+        };
+        let mut out = PluginOutput::default();
+        out = out.line(format!("name:        {}", a.name));
+        out = out.line(format!("printable:   {}", a.printable));
+        if !a.aliases.is_empty() {
+            out = out.line(format!("aliases:     {}", a.aliases.join(", ")));
+        }
+        out = out.line(format!("word size:   {} bits", a.bits_per_word));
+        out = out.line(format!("addr size:   {} bits ({} bytes)", a.bits_per_address, a.pointer_size()));
+        out = out.line(format!("byte order:  {}", a.byte_order.name()));
+        out = out.line(format!("ELF machine: {}", a.elf_machine.map(|m| format!("{m} (0x{m:x})")).unwrap_or_else(|| "n/a".into())));
+        out = out.line(format!("disassembler:{}", if a.has_disassembler() { " capstone (live)" } else { " none in this build (descriptor only)" }));
+        out
+    }
+}
+
+pub struct DisasmArchPlugin;
+impl Plugin for DisasmArchPlugin {
+    fn meta(&self) -> PluginMeta {
+        PluginMeta {
+            id: "disasm-arch",
+            name: "Disassemble (any architecture)",
+            description: "Disassemble the current memory window for a named arch. Arg: '<arch> [le|be] [count]'.",
+            category: PluginCategory::Rev,
+        }
+    }
+    fn run(&self, state: &AppState, arg: Option<&str>) -> PluginOutput {
+        use crate::target::arch::Endian;
+        let mut out = PluginOutput::default();
+        let arg = arg.unwrap_or("").trim();
+        let mut parts = arg.split_whitespace();
+        let Some(name) = parts.next() else {
+            return out.line("[!] usage: disasm-arch <arch> [le|be] [count]");
+        };
+        let mut endian = Endian::Auto;
+        let mut count = 16usize;
+        for p in parts {
+            match p.to_ascii_lowercase().as_str() {
+                "le" | "little" => endian = Endian::Little,
+                "be" | "big" => endian = Endian::Big,
+                other => if let Some(n) = parse_num_usize(other) { count = n; },
+            }
+        }
+        if state.memory_bytes.is_empty() {
+            return out.line("[!] memory window empty (read some memory first)");
+        }
+        match crate::pwn::asm::disasm_named(name, endian, state.memory_view_address, &state.memory_bytes) {
+            Ok(insns) => {
+                if insns.is_empty() {
+                    out = out.line("[!] no instructions decoded");
+                }
+                for i in insns.iter().take(count) {
+                    out = out.line(format!(
+                        "0x{:016x}: {:<24} {} {}",
+                        i.address,
+                        i.bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" "),
+                        i.mnemonic, i.operands,
+                    ));
+                }
+            }
+            Err(e) => out = out.line(format!("[!] {e}")),
+        }
+        out
+    }
+}
+
+pub struct EntropyPlugin;
+impl Plugin for EntropyPlugin {
+    fn meta(&self) -> PluginMeta {
+        PluginMeta {
+            id: "entropy",
+            name: "Entropy / Packer Scan",
+            description: "Shannon entropy of the loaded binary (per section) and current memory window.",
+            category: PluginCategory::Analysis,
+        }
+    }
+    fn run(&self, state: &AppState, _arg: Option<&str>) -> PluginOutput {
+        use crate::analysis::entropy;
+        let mut out = PluginOutput::default();
+        if let (Some(info), Some(bytes)) = (state.binary.as_ref(), state.binary_bytes.as_ref()) {
+            let whole = entropy::shannon(bytes);
+            out = out.line(format!("file entropy: {:.3} bits/byte  ({})", whole, entropy::classify(whole)));
+            for s in &info.sections {
+                let start = s.file_offset as usize;
+                let end = (s.file_offset + s.file_size) as usize;
+                if start < end && end <= bytes.len() && s.file_size > 0 {
+                    let e = entropy::shannon(&bytes[start..end]);
+                    out = out.line(format!("  {:<16} {:.3}  {}", s.name, e, entropy::classify(e)));
+                }
+            }
+            // Flag suspicious high-entropy regions.
+            for r in entropy::high_entropy_regions(bytes, 256, 7.2).into_iter().take(8) {
+                out = out.line(format!("  [!] high-entropy region @ 0x{:x} ({} bytes, {:.2})", r.offset, r.len, r.entropy));
+            }
+        }
+        if !state.memory_bytes.is_empty() {
+            let e = entropy::shannon(&state.memory_bytes);
+            out = out.line(format!("memory window entropy: {:.3}  ({})", e, entropy::classify(e)));
+        }
+        if out.lines.is_empty() {
+            out = out.line("[!] no binary or memory loaded");
+        }
+        out
+    }
+}
+
+pub struct IocScanPlugin;
+impl Plugin for IocScanPlugin {
+    fn meta(&self) -> PluginMeta {
+        PluginMeta {
+            id: "iocs",
+            name: "Extract Flags / IoCs",
+            description: "Scan the binary (or memory) for flags, URLs, IPv4, e-mails, Base64. Arg: optional flag format e.g. 'picoCTF'.",
+            category: PluginCategory::Rev,
+        }
+    }
+    fn run(&self, state: &AppState, arg: Option<&str>) -> PluginOutput {
+        use crate::analysis::iocs;
+        let fmt = arg.map(str::trim).filter(|s| !s.is_empty());
+        let bytes: &[u8] = state.binary_bytes.as_deref()
+            .filter(|b| !b.is_empty())
+            .unwrap_or(&state.memory_bytes);
+        if bytes.is_empty() {
+            return PluginOutput::default().line("[!] no binary or memory loaded");
+        }
+        let found = iocs::extract(bytes, fmt);
+        let mut out = PluginOutput::default();
+        if found.is_empty() {
+            return out.line("[*] no indicators found");
+        }
+        let section = |out: PluginOutput, title: &str, items: &[String]| {
+            if items.is_empty() { return out; }
+            let mut o = out.line(format!("--- {} ({}) ---", title, items.len()));
+            for it in items.iter().take(50) { o = o.line(it.clone()); }
+            o
+        };
+        out = section(out, "flags", &found.flags);
+        out = section(out, "urls", &found.urls);
+        out = section(out, "ipv4", &found.ipv4);
+        out = section(out, "emails", &found.emails);
+        out = section(out, "base64 blobs", &found.base64_blobs);
+        out
+    }
+}
+
+// --------------------------------------------------------------- Crypto ---
+
+pub struct CryptoIdPlugin;
+impl Plugin for CryptoIdPlugin {
+    fn meta(&self) -> PluginMeta {
+        PluginMeta {
+            id: "crypto-id",
+            name: "Identify Crypto Constants",
+            description: "Scan the binary (or memory) for AES/SHA/MD5/CRC32 constants and known tables.",
+            category: PluginCategory::Crypto,
+        }
+    }
+    fn run(&self, state: &AppState, _arg: Option<&str>) -> PluginOutput {
+        use crate::analysis::crypto;
+        let bytes: &[u8] = state.binary_bytes.as_deref()
+            .filter(|b| !b.is_empty())
+            .unwrap_or(&state.memory_bytes);
+        if bytes.is_empty() {
+            return PluginOutput::default().line("[!] no binary or memory loaded");
+        }
+        let hits = crypto::scan_constants(bytes);
+        let mut out = PluginOutput::default();
+        if hits.is_empty() {
+            return out.line("[*] no known crypto constants found");
+        }
+        for h in hits {
+            out = out.line(format!("0x{:08x}  {}", h.offset, h.name));
+        }
+        out
+    }
+}
+
+pub struct HashIdPlugin;
+impl Plugin for HashIdPlugin {
+    fn meta(&self) -> PluginMeta {
+        PluginMeta {
+            id: "hash-id",
+            name: "Identify Hash",
+            description: "Guess the hash algorithm of a digest string by length/format. Arg: the hash.",
+            category: PluginCategory::Crypto,
+        }
+    }
+    fn run(&self, _state: &AppState, arg: Option<&str>) -> PluginOutput {
+        use crate::analysis::crypto;
+        let Some(h) = arg.map(str::trim).filter(|s| !s.is_empty()) else {
+            return PluginOutput::default().line("[!] usage: hash-id <digest>");
+        };
+        let mut out = PluginOutput::default().line(format!("candidates for {} ({} chars):", h, h.len()));
+        for c in crypto::identify_hash(h) {
+            out = out.line(format!("  - {c}"));
+        }
+        out
+    }
+}
+
+// ----------------------------------------------------------- Deobfuscation -
+
+pub struct DeobfuscatePlugin;
+impl Plugin for DeobfuscatePlugin {
+    fn meta(&self) -> PluginMeta {
+        PluginMeta {
+            id: "deobf",
+            name: "Deobfuscate Expression (MBA)",
+            description: "Simplify a mixed boolean-arithmetic expression. Arg: e.g. '(x ^ y) + 2*(x & y)'.",
+            category: PluginCategory::Deobfuscation,
+        }
+    }
+    fn run(&self, _state: &AppState, arg: Option<&str>) -> PluginOutput {
+        use crate::analysis::deobfuscate;
+        let Some(expr) = arg.map(str::trim).filter(|s| !s.is_empty()) else {
+            return PluginOutput::default()
+                .line("[!] usage: deobf <expr>   (vars a-z, ops + - * & | ^ ~ << >>)");
+        };
+        match deobfuscate::deobfuscate(expr) {
+            Ok(d) => {
+                let mut out = PluginOutput::default();
+                out = out.line(format!("input:      {}", d.original));
+                out = out.line(format!("simplified: {}", d.simplified));
+                if let Some(s) = d.synthesized {
+                    out = out.line(format!("synthesized: {s}"));
+                    out = out.line("  (equivalent over 400+ sampled inputs across the 64-bit ring)");
+                }
+                if let Some(c) = d.constant_value {
+                    out = out.line(format!("value:      {c} (0x{c:x})"));
+                }
+                if !d.variables.is_empty() {
+                    out = out.line(format!("variables:  {}", d.variables.join(", ")));
+                }
+                out
+            }
+            Err(e) => PluginOutput::default().line(format!("[!] parse error: {e}")),
+        }
+    }
+}
+
+pub struct DecodePlugin;
+impl Plugin for DecodePlugin {
+    fn meta(&self) -> PluginMeta {
+        PluginMeta {
+            id: "decode",
+            name: "Auto-Decode",
+            description: "Peel Base64/hex/Base32/ASCII85/URL layers off a string (or the memory window).",
+            category: PluginCategory::Deobfuscation,
+        }
+    }
+    fn run(&self, state: &AppState, arg: Option<&str>) -> PluginOutput {
+        use crate::pwn::encoding;
+        let owned;
+        let data: &[u8] = match arg.map(str::trim).filter(|s| !s.is_empty()) {
+            Some(s) => { owned = s.as_bytes().to_vec(); &owned }
+            None => &state.memory_bytes,
+        };
+        if data.is_empty() {
+            return PluginOutput::default().line("[!] usage: decode <string>  (or read memory first)");
+        }
+        let steps = encoding::auto_decode(data, 8);
+        let mut out = PluginOutput::default();
+        if steps.is_empty() {
+            return out.line("[*] no decoding layer applied (input not a recognised encoding)");
+        }
+        for (i, s) in steps.iter().enumerate() {
+            let preview = String::from_utf8_lossy(&s.output);
+            let preview: String = preview.chars().take(120).collect();
+            out = out.line(format!("[{}] {:<8} -> {}", i + 1, s.codec, preview));
+        }
+        out
+    }
+}
+
+pub struct XorKeyPlugin;
+impl Plugin for XorKeyPlugin {
+    fn meta(&self) -> PluginMeta {
+        PluginMeta {
+            id: "xor-key",
+            name: "Break Repeating-Key XOR",
+            description: "Recover a repeating XOR key over the current memory window. Arg: max key size (default 40).",
+            category: PluginCategory::Deobfuscation,
+        }
+    }
+    fn run(&self, state: &AppState, arg: Option<&str>) -> PluginOutput {
+        use crate::pwn::xor;
+        if state.memory_bytes.is_empty() {
+            return PluginOutput::default().line("[!] memory window empty (read some memory first)");
+        }
+        let max_ks = arg.and_then(parse_num_usize).unwrap_or(40);
+        match xor::break_repeating_xor_auto(&state.memory_bytes, max_ks) {
+            Some((key, pt, score)) => {
+                let key_hex: String = key.iter().map(|b| format!("{b:02x}")).collect();
+                let key_ascii: String = key.iter()
+                    .map(|&b| if b.is_ascii_graphic() { b as char } else { '.' }).collect();
+                let preview: String = pt.iter().take(120)
+                    .map(|&b| if b.is_ascii_graphic() || b == b' ' { b as char } else { '.' }).collect();
+                PluginOutput::default()
+                    .line(format!("key ({} bytes): {} | \"{}\"  english-score={:.3}", key.len(), key_hex, key_ascii, score))
+                    .line(format!("plaintext: {preview}"))
+            }
+            None => PluginOutput::default().line("[!] could not recover a key (buffer too small)"),
+        }
+    }
+}
+
+// ---------------------------------------------------------- Pwn (gadgets) --
+
+pub struct GadgetPlugin;
+impl Plugin for GadgetPlugin {
+    fn meta(&self) -> PluginMeta {
+        PluginMeta {
+            id: "gadget",
+            name: "Gadget Search",
+            description: "Find x86/x64 ROP gadgets matching a query in the first exec section. Arg: e.g. 'pop rdi'.",
+            category: PluginCategory::Pwn,
+        }
+    }
+    fn run(&self, state: &AppState, arg: Option<&str>) -> PluginOutput {
+        let query = arg.unwrap_or("").trim();
+        let mut out = PluginOutput::default();
+        let (Some(info), Some(bytes)) = (state.binary.as_ref(), state.binary_bytes.as_ref()) else {
+            return out.line("[!] no binary loaded");
+        };
+        let Some(sec) = info.sections.iter().find(|s| s.executable) else {
+            return out.line("[!] no executable section");
+        };
+        let start = sec.file_offset as usize;
+        let end = (sec.file_offset + sec.file_size) as usize;
+        if end > bytes.len() {
+            return out.line("[!] section out of file range");
+        }
+        match crate::pwn::gadget::find(&bytes[start..end], sec.virtual_address, info.architecture, query) {
+            Ok(gadgets) => {
+                out = out.line(format!("{} gadget(s){}:", gadgets.len(),
+                    if query.is_empty() { String::new() } else { format!(" matching '{query}'") }));
+                for g in gadgets.iter().take(80) {
+                    out = out.line(format!("0x{:016x}: {}", g.address, g.text));
+                }
+            }
+            Err(e) => out = out.line(format!("[!] {e}")),
+        }
+        out
+    }
+}
+
+pub struct SyscallSitesPlugin;
+impl Plugin for SyscallSitesPlugin {
+    fn meta(&self) -> PluginMeta {
+        PluginMeta {
+            id: "syscall-sites",
+            name: "Find Syscall Sites",
+            description: "Locate syscall / int 0x80 / sysenter instructions in the first exec section.",
+            category: PluginCategory::Pwn,
+        }
+    }
+    fn run(&self, state: &AppState, _arg: Option<&str>) -> PluginOutput {
+        let mut out = PluginOutput::default();
+        let (Some(info), Some(bytes)) = (state.binary.as_ref(), state.binary_bytes.as_ref()) else {
+            return out.line("[!] no binary loaded");
+        };
+        let Some(sec) = info.sections.iter().find(|s| s.executable) else {
+            return out.line("[!] no executable section");
+        };
+        let start = sec.file_offset as usize;
+        let end = (sec.file_offset + sec.file_size) as usize;
+        if end > bytes.len() {
+            return out.line("[!] section out of file range");
+        }
+        let sites = crate::pwn::gadget::syscall_sites(&bytes[start..end], sec.virtual_address);
+        out = out.line(format!("{} syscall site(s):", sites.len()));
+        for s in sites.iter().take(100) {
+            out = out.line(format!("0x{:016x}: {}", s.address, s.kind));
         }
         out
     }

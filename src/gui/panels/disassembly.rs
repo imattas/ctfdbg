@@ -3,6 +3,7 @@ use crate::gui::actions::Action;
 use crate::gui::state::{AppState, DebugCommand};
 use crate::gui::theme::color;
 use crate::gui::widgets::address::parse_hex;
+use crate::gui::widgets::disasm_syntax;
 use crate::target::arch::Architecture;
 use egui::{RichText, Sense, Ui};
 
@@ -50,8 +51,14 @@ pub fn show(ui: &mut Ui, state: &mut AppState, actions: &mut Vec<Action>) {
                     ui.monospace(RichText::new(format!("{:016x}", ins.address)).color(color::ADDRESS));
                     let bytes_str = ins.bytes.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
                     ui.monospace(RichText::new(format!("{:<24}", bytes_str)).color(color::MUTED));
-                    ui.monospace(RichText::new(format!("{:<8}", ins.mnemonic)).strong());
-                    ui.monospace(ins.op_str.clone());
+                    ui.monospace(
+                        RichText::new(format!("{:<8}", ins.mnemonic))
+                            .color(disasm_syntax::mnemonic_color(&ins.mnemonic))
+                            .strong(),
+                    );
+                    if !ins.op_str.is_empty() {
+                        ui.label(disasm_syntax::operand_job(&ins.op_str, 13.0));
+                    }
                     if let Some(sym) = symbol_label(state, ins) {
                         ui.monospace(RichText::new(format!("; {}", sym)).color(color::HINT));
                     }

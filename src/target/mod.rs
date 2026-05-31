@@ -1,4 +1,5 @@
 pub mod arch;
+pub mod bfd;
 pub mod binary;
 pub mod elf;
 pub mod format;

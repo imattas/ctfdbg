@@ -1,49 +1,47 @@
-//! One-shot disassembly helper using capstone.  No `asm` (assembly) is
-//! offered because we deliberately avoid pulling in `keystone-engine`
-//! (a separate native dependency).
+//! One-shot disassembly helpers for the GUI / commands / plugins.
 //!
-//! Use [`disasm_one`] / [`disasm_all`] from the GUI / commands /
-//! plugins to render arbitrary buffers.
+//! This is a thin convenience layer over [`crate::analysis::disasm`], which
+//! does the real multi-architecture work.  No assembler (`asm`) is offered:
+//! we deliberately avoid pulling in `keystone-engine` (a separate native
+//! dependency).
 
-use capstone::prelude::*;
-
-use crate::error::{DbgError, DbgResult};
-use crate::target::arch::Architecture;
+use crate::analysis::disasm::Disassembler;
+use crate::error::DbgResult;
+use crate::target::arch::{Architecture, Endian};
 
 #[derive(Debug, Clone)]
 pub struct DisasmInsn {
     pub address: u64,
-    pub bytes:   Vec<u8>,
+    pub bytes: Vec<u8>,
     pub mnemonic: String,
     pub operands: String,
 }
 
-fn build(arch: Architecture) -> DbgResult<Capstone> {
-    let cs = match arch {
-        Architecture::X86_64 => Capstone::new().x86().mode(arch::x86::ArchMode::Mode64).syntax(arch::x86::ArchSyntax::Intel).detail(true).build(),
-        Architecture::X86    => Capstone::new().x86().mode(arch::x86::ArchMode::Mode32).syntax(arch::x86::ArchSyntax::Intel).detail(true).build(),
-        Architecture::AArch64 => Capstone::new().arm64().mode(arch::arm64::ArchMode::Arm).detail(true).build(),
-        Architecture::Arm    => Capstone::new().arm().mode(arch::arm::ArchMode::Arm).detail(true).build(),
-        Architecture::Riscv64 => Capstone::new().x86().mode(arch::x86::ArchMode::Mode64).syntax(arch::x86::ArchSyntax::Intel).detail(true).build(),
-        Architecture::Auto   => Capstone::new().x86().mode(arch::x86::ArchMode::Mode64).syntax(arch::x86::ArchSyntax::Intel).detail(true).build(),
-    };
-    cs.map_err(|e| DbgError::Capstone(format!("capstone init: {e}")))
+impl From<crate::analysis::disasm::DisasmInsn> for DisasmInsn {
+    fn from(i: crate::analysis::disasm::DisasmInsn) -> Self {
+        Self {
+            address: i.address,
+            bytes: i.bytes,
+            mnemonic: i.mnemonic,
+            operands: i.op_str,
+        }
+    }
 }
 
 pub fn disasm_all(arch: Architecture, base: u64, bytes: &[u8]) -> DbgResult<Vec<DisasmInsn>> {
-    let cs = build(arch)?;
-    let insns = cs.disasm_all(bytes, base)
-        .map_err(|e| DbgError::Capstone(format!("disasm: {e}")))?;
-    Ok(insns.iter().map(|i| DisasmInsn {
-        address: i.address(),
-        bytes:   i.bytes().to_vec(),
-        mnemonic: i.mnemonic().unwrap_or("").to_string(),
-        operands: i.op_str().unwrap_or("").to_string(),
-    }).collect())
+    let dis = Disassembler::new(arch)?;
+    Ok(dis.disassemble_all(bytes, base)?.into_iter().map(Into::into).collect())
 }
 
 pub fn disasm_one(arch: Architecture, base: u64, bytes: &[u8]) -> DbgResult<Option<DisasmInsn>> {
     Ok(disasm_all(arch, base, bytes)?.into_iter().next())
+}
+
+/// Disassemble for any BFD architecture by name (e.g. `"mips64el"`, `"ppc64"`,
+/// `"sparc:v9"`), honouring an explicit endianness override.
+pub fn disasm_named(name: &str, endian: Endian, base: u64, bytes: &[u8]) -> DbgResult<Vec<DisasmInsn>> {
+    let dis = Disassembler::for_named(name, endian)?;
+    Ok(dis.disassemble_all(bytes, base)?.into_iter().map(Into::into).collect())
 }
 
 /// Render a sequence as a multi-line string, mimicking `pwntools.disasm`.

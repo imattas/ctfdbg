@@ -10,14 +10,19 @@ use goblin::elf::Elf;
 pub fn parse_elf(bytes: &[u8], path: Option<std::path::PathBuf>) -> DbgResult<BinaryInfo> {
     let elf = Elf::parse(bytes)?;
 
-    let arch = match elf.header.e_machine {
-        goblin::elf::header::EM_386 => Architecture::X86,
-        goblin::elf::header::EM_X86_64 => Architecture::X86_64,
-        goblin::elf::header::EM_ARM => Architecture::Arm,
-        goblin::elf::header::EM_AARCH64 => Architecture::AArch64,
-        goblin::elf::header::EM_RISCV => Architecture::Riscv64,
-        _ => Architecture::Auto,
-    };
+    // Resolve via the full BFD architecture table (covers ~80 machines and
+    // refines byte order), falling back to the legacy short list.
+    let arch = crate::target::bfd::from_elf_machine(elf.header.e_machine, !elf.little_endian)
+        .map(|a| a.arch)
+        .filter(|a| !matches!(a, Architecture::Unsupported))
+        .unwrap_or_else(|| match elf.header.e_machine {
+            goblin::elf::header::EM_386 => Architecture::X86,
+            goblin::elf::header::EM_X86_64 => Architecture::X86_64,
+            goblin::elf::header::EM_ARM => Architecture::Arm,
+            goblin::elf::header::EM_AARCH64 => Architecture::AArch64,
+            goblin::elf::header::EM_RISCV => Architecture::Riscv64,
+            _ => Architecture::Auto,
+        });
 
     let sections = elf
         .section_headers

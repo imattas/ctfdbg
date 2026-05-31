@@ -20,7 +20,7 @@ pub fn show(ctx: &Context, state: &mut AppState, _actions: &mut Vec<Action>) {
                     crate::config::BackendKind::LinuxPtrace => "Linux ptrace",
                     crate::config::BackendKind::Auto => "Auto",
                 };
-                egui::ComboBox::from_id_source("adapter_kind").selected_text(cur).show_ui(ui, |ui| {
+                egui::ComboBox::from_id_salt("adapter_kind").selected_text(cur).show_ui(ui, |ui| {
                     use crate::config::BackendKind::*;
                     ui.selectable_value(&mut state.cfg.backend, Auto, "Auto");
                     ui.selectable_value(&mut state.cfg.backend, WindowsDebugApi, "Windows Debug API");

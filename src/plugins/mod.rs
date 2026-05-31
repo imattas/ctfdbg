@@ -45,17 +45,33 @@ pub struct PluginMeta {
 pub enum PluginCategory {
     Analysis,
     Pwn,
+    Crypto,
+    Deobfuscation,
+    Rev,
     Utility,
 }
 
 impl PluginCategory {
     pub fn label(self) -> &'static str {
         match self {
-            PluginCategory::Analysis => "Analysis",
-            PluginCategory::Pwn      => "Pwn",
-            PluginCategory::Utility  => "Utility",
+            PluginCategory::Analysis      => "Analysis",
+            PluginCategory::Pwn           => "Pwn",
+            PluginCategory::Crypto        => "Crypto",
+            PluginCategory::Deobfuscation => "Deobfuscation",
+            PluginCategory::Rev           => "Reverse Engineering",
+            PluginCategory::Utility       => "Utility",
         }
     }
+
+    /// All categories in display order.
+    pub const ALL: &'static [PluginCategory] = &[
+        PluginCategory::Analysis,
+        PluginCategory::Rev,
+        PluginCategory::Crypto,
+        PluginCategory::Deobfuscation,
+        PluginCategory::Pwn,
+        PluginCategory::Utility,
+    ];
 }
 
 pub trait Plugin: Send + Sync {
@@ -109,5 +125,117 @@ pub fn default_plugins() -> PluginRegistry {
     r.register(builtins::XorBrutePlugin);
     r.register(builtins::ShellcodeListPlugin);
     r.register(builtins::DisasmPlugin);
+    // Architecture / reverse-engineering
+    r.register(builtins::ArchListPlugin);
+    r.register(builtins::ArchInfoPlugin);
+    r.register(builtins::DisasmArchPlugin);
+    r.register(builtins::EntropyPlugin);
+    r.register(builtins::IocScanPlugin);
+    // Crypto
+    r.register(builtins::CryptoIdPlugin);
+    r.register(builtins::HashIdPlugin);
+    // Deobfuscation
+    r.register(builtins::DeobfuscatePlugin);
+    r.register(builtins::DecodePlugin);
+    r.register(builtins::XorKeyPlugin);
+    // Pwn
+    r.register(builtins::GadgetPlugin);
+    r.register(builtins::SyscallSitesPlugin);
     r
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::DebugConfig;
+    use crate::gui::state::{AppState, BackendUpdate, DebugCommand};
+    use crossbeam_channel::unbounded;
+
+    fn empty_state() -> AppState {
+        let (ctx, _crx) = unbounded::<DebugCommand>();
+        let (_utx, urx) = unbounded::<BackendUpdate>();
+        AppState::new(DebugConfig::empty(), ctx, urx)
+    }
+
+    fn run(reg: &PluginRegistry, st: &AppState, id: &str, arg: Option<&str>) -> Vec<String> {
+        reg.get(id)
+            .unwrap_or_else(|| panic!("missing plugin {id}"))
+            .run(st, arg)
+            .lines
+    }
+
+    #[test]
+    fn registry_metadata_is_well_formed() {
+        let reg = default_plugins();
+        let metas = reg.list();
+        assert!(metas.len() >= 20, "only {} plugins registered", metas.len());
+
+        // Ids must be unique.
+        let n = metas.len();
+        let mut ids: Vec<&str> = metas.iter().map(|m| m.id).collect();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), n, "duplicate plugin ids present");
+
+        // Every plugin needs a name and description.
+        for m in &metas {
+            assert!(!m.name.is_empty(), "{} has empty name", m.id);
+            assert!(!m.description.is_empty(), "{} has empty description", m.id);
+        }
+
+        // The new tools must all be registered.
+        for id in [
+            "deobf", "decode", "xor-key", "arch-list", "arch-info", "disasm-arch",
+            "crypto-id", "hash-id", "entropy", "iocs", "gadget", "syscall-sites",
+        ] {
+            assert!(reg.get(id).is_some(), "expected plugin '{id}' to be registered");
+        }
+    }
+
+    #[test]
+    fn stateless_plugins_produce_output() {
+        let reg = default_plugins();
+        let st = empty_state();
+
+        let out = run(&reg, &st, "deobf", Some("(x ^ y) + 2 * (x & y)"));
+        assert!(
+            out.iter().any(|l| l.contains("x + y")),
+            "deobf did not reduce MBA: {out:?}"
+        );
+
+        let out = run(&reg, &st, "hash-id", Some(&"a".repeat(64)));
+        assert!(out.iter().any(|l| l.contains("SHA-256")), "{out:?}");
+
+        let out = run(&reg, &st, "arch-list", Some("mips"));
+        assert!(out.iter().any(|l| l.to_lowercase().contains("mips")), "{out:?}");
+
+        let out = run(&reg, &st, "arch-info", Some("ppc64"));
+        assert!(out.iter().any(|l| l.contains("PowerPC")), "{out:?}");
+
+        let out = run(&reg, &st, "decode", Some("aGVsbG8="));
+        assert!(out.iter().any(|l| l.contains("hello")), "{out:?}");
+    }
+
+    #[test]
+    fn data_driven_plugins_produce_output() {
+        let reg = default_plugins();
+        let mut st = empty_state();
+
+        // A buffer carrying a flag and the AES forward S-box head.
+        let mut data = b"noise\x00flag{plugin_works}\x00".to_vec();
+        data.extend_from_slice(&[
+            0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7,
+            0xab, 0x76,
+        ]);
+        st.binary_bytes = Some(data);
+
+        let out = run(&reg, &st, "iocs", None);
+        assert!(out.iter().any(|l| l.contains("flag{plugin_works}")), "{out:?}");
+
+        let out = run(&reg, &st, "crypto-id", None);
+        assert!(out.iter().any(|l| l.contains("AES")), "{out:?}");
+
+        let out = run(&reg, &st, "entropy", None);
+        assert!(!out.is_empty());
+    }
 }
