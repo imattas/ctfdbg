@@ -203,7 +203,9 @@ quit | q | exit
 ## Built-in plugins / tools
 
 Run from the **Plugins** panel, or type the plugin id (with optional argument)
-into the Debugger Console.
+into the Debugger Console. Console output is syntax-coloured: status tags
+(`[!]`/`[+]`), addresses, `flag{...}` tokens, and full disassembly / gadget
+lines are highlighted the same way as the disassembly panel.
 
 | id              | Category      | Purpose                                              |
 | --------------- | ------------- | ---------------------------------------------------- |

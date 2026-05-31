@@ -483,7 +483,7 @@ impl Plugin for IocScanPlugin {
         if found.is_empty() {
             return out.line("[*] no indicators found");
         }
-        let mut section = |out: PluginOutput, title: &str, items: &[String]| {
+        let section = |out: PluginOutput, title: &str, items: &[String]| {
             if items.is_empty() { return out; }
             let mut o = out.line(format!("--- {} ({}) ---", title, items.len()));
             for it in items.iter().take(50) { o = o.line(it.clone()); }

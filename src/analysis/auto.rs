@@ -87,8 +87,8 @@ fn function_candidates(info: &BinaryInfo, bytes: &[u8]) -> Vec<AnalyzedFunction>
     let mut seen: BTreeSet<u64> = BTreeSet::new();
     let mut out: Vec<AnalyzedFunction> = Vec::new();
 
-    let mut push = |addr: u64, name: String, src: FunctionSource,
-                    seen: &mut BTreeSet<u64>, out: &mut Vec<AnalyzedFunction>| {
+    let push = |addr: u64, name: String, src: FunctionSource,
+                seen: &mut BTreeSet<u64>, out: &mut Vec<AnalyzedFunction>| {
         if addr == 0 { return; }
         if seen.insert(addr) {
             out.push(AnalyzedFunction { address: addr, name, source: src });

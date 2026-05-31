@@ -1,15 +1,23 @@
-//! Lightweight, architecture-agnostic syntax highlighting for disassembly.
+//! Lightweight, architecture-agnostic syntax highlighting for disassembly and
+//! for the debugger console.
 //!
 //! Mnemonics are coloured by instruction class (control flow / data movement /
 //! arithmetic / stack), and operand strings are tokenised into registers,
-//! immediates, memory-size keywords and punctuation.  The heuristics cover the
-//! capstone output for every architecture ctfdbg disassembles; unknown tokens
-//! fall back to sensible defaults rather than mis-colouring.
+//! immediates, memory-size keywords and punctuation.  The same machinery backs
+//! [`console_line_job`], which colours plugin / command output: status tags,
+//! addresses, flags, and full disassembly/gadget lines of the form
+//! `0xADDR: <bytes> <mnemonic> <operands> [; <mnemonic> <operands> ...]`.
+//!
+//! The heuristics cover the capstone output for every architecture ctfdbg
+//! disassembles; unknown tokens fall back to sensible defaults rather than
+//! mis-colouring, and the full input text is always preserved verbatim.
 
 use egui::text::{LayoutJob, TextFormat};
 use egui::{Color32, FontId};
 
 use crate::gui::theme::color;
+
+// ------------------------------------------------------------- mnemonics ----
 
 /// Colour for a mnemonic based on its instruction class.
 pub fn mnemonic_color(mnemonic: &str) -> Color32 {
@@ -45,7 +53,7 @@ fn is_flow(m: &str) -> bool {
             | "syscall" | "sysenter" | "sysret" | "hlt" | "leave"
             | "b" | "bl" | "bx" | "blx" | "br" | "blr" | "eret"
             | "j" | "jal" | "jr" | "jalr" | "jalx"
-            | "bctr" | "bctrl" | "bdnz" | "bctrl+"
+            | "bctr" | "bctrl" | "bdnz"
     ) || m.starts_with('j') // jmp, je, jne, jz, jnz, jg, jle, ...
         || m.starts_with("call")
         || m.starts_with("ret")
@@ -91,6 +99,19 @@ fn is_arith(m: &str) -> bool {
     )
 }
 
+// --------------------------------------------------------------- helpers ----
+
+fn push(job: &mut LayoutJob, font: &FontId, text: &str, c: Color32) {
+    if text.is_empty() {
+        return;
+    }
+    job.append(text, 0.0, TextFormat { font_id: font.clone(), color: c, ..Default::default() });
+}
+
+fn is_byte_token(tok: &str) -> bool {
+    tok.len() == 2 && tok.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
 /// Token classes recognised in an operand string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TokKind {
@@ -99,6 +120,16 @@ enum TokKind {
     MemKeyword,
     Punct,
     Space,
+}
+
+fn tok_color(kind: TokKind) -> Color32 {
+    match kind {
+        TokKind::Register => color::REGISTER,
+        TokKind::Immediate => color::IMMEDIATE,
+        TokKind::MemKeyword => color::MEM_KW,
+        TokKind::Punct => color::PUNCT,
+        TokKind::Space => color::TEXT,
+    }
 }
 
 fn classify_ident(ident: &str) -> TokKind {
@@ -119,24 +150,12 @@ fn classify_ident(ident: &str) -> TokKind {
     TokKind::Register
 }
 
-/// Build a coloured [`LayoutJob`] for an operand string at the given font size.
-pub fn operand_job(op_str: &str, font_size: f32) -> LayoutJob {
-    let font = FontId::monospace(font_size);
-    let mut job = LayoutJob::default();
+// --------------------------------------------------------------- operands ---
+
+/// Append a coloured operand string to `job`, preserving all characters.
+fn append_operands(job: &mut LayoutJob, font: &FontId, op_str: &str) {
     let bytes = op_str.as_bytes();
     let mut i = 0;
-
-    let mut push = |job: &mut LayoutJob, text: &str, kind: TokKind| {
-        let c = match kind {
-            TokKind::Register => color::REGISTER,
-            TokKind::Immediate => color::IMMEDIATE,
-            TokKind::MemKeyword => color::MEM_KW,
-            TokKind::Punct => color::PUNCT,
-            TokKind::Space => color::TEXT,
-        };
-        job.append(text, 0.0, TextFormat { font_id: font.clone(), color: c, ..Default::default() });
-    };
-
     while i < bytes.len() {
         let c = bytes[i];
         if c.is_ascii_whitespace() {
@@ -144,24 +163,21 @@ pub fn operand_job(op_str: &str, font_size: f32) -> LayoutJob {
             while i < bytes.len() && bytes[i].is_ascii_whitespace() {
                 i += 1;
             }
-            push(&mut job, &op_str[start..i], TokKind::Space);
+            push(job, font, &op_str[start..i], tok_color(TokKind::Space));
         } else if c == b'0' && i + 1 < bytes.len() && (bytes[i + 1] | 0x20) == b'x' {
-            // Hex literal 0x....
             let start = i;
             i += 2;
             while i < bytes.len() && bytes[i].is_ascii_hexdigit() {
                 i += 1;
             }
-            push(&mut job, &op_str[start..i], TokKind::Immediate);
+            push(job, font, &op_str[start..i], tok_color(TokKind::Immediate));
         } else if c.is_ascii_digit() {
             let start = i;
             while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'.') {
                 i += 1;
             }
-            push(&mut job, &op_str[start..i], TokKind::Immediate);
+            push(job, font, &op_str[start..i], tok_color(TokKind::Immediate));
         } else if c.is_ascii_alphabetic() || c == b'_' || c == b'%' || c == b'$' || c == b'.' {
-            // Identifier (register, keyword, or label). Allow leading %/$ for
-            // AT&T-style register/immediate sigils.
             let start = i;
             i += 1;
             while i < bytes.len()
@@ -170,15 +186,201 @@ pub fn operand_job(op_str: &str, font_size: f32) -> LayoutJob {
                 i += 1;
             }
             let tok = &op_str[start..i];
-            // AT&T immediate ($0x1) — sigil then number handled above; here a
-            // leading '$' identifier is rare, treat normally.
-            push(&mut job, tok, classify_ident(tok.trim_start_matches(['%', '$'])));
+            push(job, font, tok, tok_color(classify_ident(tok.trim_start_matches(['%', '$']))));
         } else {
-            // Punctuation: [ ] + - * , : ! # { } etc.
-            push(&mut job, &op_str[i..i + 1], TokKind::Punct);
+            push(job, font, &op_str[i..i + 1], tok_color(TokKind::Punct));
             i += 1;
         }
     }
+}
+
+/// Build a coloured [`LayoutJob`] for an operand string at the given font size.
+pub fn operand_job(op_str: &str, font_size: f32) -> LayoutJob {
+    let font = FontId::monospace(font_size);
+    let mut job = LayoutJob::default();
+    append_operands(&mut job, &font, op_str);
+    job
+}
+
+// ------------------------------------------------------- instruction text ---
+
+/// Colour a single instruction (`mnemonic operands`), preserving spacing.
+fn append_one_insn(job: &mut LayoutJob, font: &FontId, seg: &str) {
+    let bytes = seg.as_bytes();
+    let mut i = 0;
+    // leading whitespace
+    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    push(job, font, &seg[..i], color::TEXT);
+    // mnemonic token
+    let start = i;
+    while i < bytes.len() && !bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    let mnem = &seg[start..i];
+    push(job, font, mnem, mnemonic_color(mnem));
+    // remaining operands (includes the separating space)
+    append_operands(job, font, &seg[i..]);
+}
+
+/// Colour a code string that may contain several `;`-separated instructions
+/// (as gadget output does), preserving the separators and spacing.
+fn append_code(job: &mut LayoutJob, font: &FontId, code: &str) {
+    for (idx, seg) in code.split(';').enumerate() {
+        if idx > 0 {
+            push(job, font, ";", color::PUNCT);
+        }
+        append_one_insn(job, font, seg);
+    }
+}
+
+// ----------------------------------------------------------- console lines --
+
+/// Length of a leading `0x...` hex literal in `s`, or `None`.
+fn leading_hex_len(s: &str) -> Option<usize> {
+    let b = s.as_bytes();
+    if b.len() >= 3 && b[0] == b'0' && (b[1] | 0x20) == b'x' {
+        let mut i = 2;
+        while i < b.len() && b[i].is_ascii_hexdigit() {
+            i += 1;
+        }
+        if i > 2 {
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// Generic colouring for non-instruction text: addresses, `flag{...}`-style
+/// tokens, and trailing `;` comments; everything else stays default.
+fn append_generic(job: &mut LayoutJob, font: &FontId, text: &str) {
+    let b = text.as_bytes();
+    let mut i = 0;
+    let mut run = 0; // start of the pending default-coloured run
+    while i < b.len() {
+        if b[i] == b'0' && i + 1 < b.len() && (b[i + 1] | 0x20) == b'x' {
+            push(job, font, &text[run..i], color::TEXT);
+            let start = i;
+            i += 2;
+            while i < b.len() && b[i].is_ascii_hexdigit() {
+                i += 1;
+            }
+            push(job, font, &text[start..i], color::ADDRESS);
+            run = i;
+            continue;
+        }
+        if b[i] == b';' {
+            push(job, font, &text[run..i], color::TEXT);
+            push(job, font, &text[i..], color::HINT);
+            return;
+        }
+        if b[i].is_ascii_alphabetic() {
+            let start = i;
+            while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_') {
+                i += 1;
+            }
+            if i < b.len() && b[i] == b'{' {
+                if let Some(close) = text[i..].find('}') {
+                    let end = i + close + 1;
+                    push(job, font, &text[run..start], color::TEXT);
+                    push(job, font, &text[start..end], color::STRING);
+                    i = end;
+                    run = i;
+                    continue;
+                }
+            }
+            // not a flag — leave the identifier in the pending run
+            continue;
+        }
+        i += 1;
+    }
+    push(job, font, &text[run..], color::TEXT);
+}
+
+/// Colour the part of a disassembly line after the `address:` — an optional
+/// hex byte column (muted) followed by one or more instructions.
+fn append_after_colon(job: &mut LayoutJob, font: &FontId, rest: &str) {
+    let trimmed = rest.trim_start_matches(' ');
+    let lead = &rest[..rest.len() - trimmed.len()];
+    push(job, font, lead, color::TEXT);
+
+    // Consume a run of 2-hex-digit byte tokens as the byte column.
+    let b = trimmed.as_bytes();
+    let mut i = 0;
+    loop {
+        let tok_start = i;
+        while i < b.len() && b[i] != b' ' {
+            i += 1;
+        }
+        let tok = &trimmed[tok_start..i];
+        if is_byte_token(tok) {
+            while i < b.len() && b[i] == b' ' {
+                i += 1;
+            }
+            continue;
+        }
+        // Instruction begins at tok_start.
+        push(job, font, &trimmed[..tok_start], color::MUTED);
+        append_code(job, font, &trimmed[tok_start..]);
+        return;
+    }
+}
+
+/// Build a coloured [`LayoutJob`] for a single debugger-console line.
+pub fn console_line_job(line: &str, font_size: f32) -> LayoutJob {
+    let font = FontId::monospace(font_size);
+    let mut job = LayoutJob::default();
+    let mut s = line;
+
+    // Echoed command prompt.
+    if let Some(rest) = s.strip_prefix("dbg>") {
+        push(&mut job, &font, "dbg>", color::ACCENT);
+        s = rest;
+    }
+
+    // Leading status / plugin-id tags, e.g. "[!]", "[event]", "[disasm]".
+    loop {
+        let trimmed = s.trim_start_matches(' ');
+        push(&mut job, &font, &s[..s.len() - trimmed.len()], color::TEXT);
+        s = trimmed;
+        if s.starts_with('[') {
+            if let Some(end) = s.find(']') {
+                let tag = &s[..=end];
+                let c = if tag == "[!]" {
+                    color::ERROR
+                } else if tag == "[+]" {
+                    color::OK
+                } else {
+                    color::ACCENT
+                };
+                push(&mut job, &font, tag, c);
+                s = &s[end + 1..];
+                continue;
+            }
+        }
+        break;
+    }
+
+    // Body: detect an address-led disassembly/listing line, else generic.
+    let trimmed = s.trim_start_matches(' ');
+    push(&mut job, &font, &s[..s.len() - trimmed.len()], color::TEXT);
+    let body = trimmed;
+
+    if let Some(hexlen) = leading_hex_len(body) {
+        push(&mut job, &font, &body[..hexlen], color::ADDRESS);
+        let after = &body[hexlen..];
+        if let Some(rest) = after.strip_prefix(':') {
+            push(&mut job, &font, ":", color::PUNCT);
+            append_after_colon(&mut job, &font, rest);
+        } else {
+            // Address listing (e.g. `0x... symbol`): colour the rest generically.
+            append_generic(&mut job, &font, after);
+        }
+    } else {
+        append_generic(&mut job, &font, body);
+    }
+
     job
 }
 
@@ -200,15 +402,33 @@ mod tests {
 
     #[test]
     fn operand_tokenises() {
-        // Should not panic and should consume the whole string.
         let job = operand_job("qword ptr [rbp - 0x10], rax", 13.0);
-        let rebuilt: String = job.text;
-        assert_eq!(rebuilt, "qword ptr [rbp - 0x10], rax");
+        assert_eq!(job.text, "qword ptr [rbp - 0x10], rax");
     }
 
     #[test]
     fn empty_ok() {
         let job = operand_job("", 13.0);
         assert!(job.text.is_empty());
+    }
+
+    // Every console line must be reproduced verbatim, regardless of shape.
+    fn assert_roundtrip(line: &str) {
+        let job = console_line_job(line, 13.0);
+        assert_eq!(job.text, line, "round-trip mismatch for {line:?}");
+    }
+
+    #[test]
+    fn console_roundtrips_all_shapes() {
+        assert_roundtrip("[disasm] 0x0000000000401000: 55                       push rbp");
+        assert_roundtrip("[disasm] 0x401001: 48 89 e5                 mov rbp, rsp");
+        assert_roundtrip("[gadget] 0x0000000000401234: pop rdi ; ret");
+        assert_roundtrip("  0x0000000000401000  pop rsi ; pop r15 ; ret");
+        assert_roundtrip("[iocs] flag{some_flag_here}");
+        assert_roundtrip("[!] something went wrong at 0xdeadbeef");
+        assert_roundtrip("[+] ok");
+        assert_roundtrip("dbg> disasm 0x401000 8");
+        assert_roundtrip("plain text with no structure");
+        assert_roundtrip("");
     }
 }

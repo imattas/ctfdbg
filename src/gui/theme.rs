@@ -1,6 +1,6 @@
 //! Dark theme inspired by Binary Ninja.
 
-use egui::{Color32, FontFamily, FontId, Stroke, TextStyle, Visuals};
+use egui::{FontFamily, FontId, Stroke, TextStyle, Visuals};
 
 pub mod color {
     use egui::Color32;
@@ -38,6 +38,10 @@ pub mod color {
     pub const MEM_KW: Color32    = Color32::from_rgb(0x56, 0xd4, 0xdd);
     /// Punctuation ([], +, *, commas).
     pub const PUNCT: Color32     = Color32::from_rgb(0x9a, 0x9f, 0xa8);
+    /// Error / warning console lines (`[!]`).
+    pub const ERROR: Color32     = Color32::from_rgb(0xff, 0x6a, 0x6a);
+    /// Success console lines (`[+]`).
+    pub const OK: Color32        = Color32::from_rgb(0x6a, 0xff, 0x9e);
 }
 
 pub fn install(ctx: &egui::Context) {

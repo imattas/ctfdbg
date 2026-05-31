@@ -2,8 +2,7 @@ use crate::commands::ast::Command;
 use crate::commands::parser::{parse_line, parse_u64};
 use crate::gui::actions::Action;
 use crate::gui::state::{AppState, DebugCommand};
-use crate::gui::theme::color;
-use egui::{RichText, Ui};
+use egui::Ui;
 
 pub fn show_tabbed(ui: &mut Ui, state: &mut AppState, actions: &mut Vec<Action>) {
     let id = ui.id().with("bottom_tab");
@@ -35,11 +34,7 @@ fn debugger_console_panel(ui: &mut Ui, state: &mut AppState, actions: &mut Vec<A
 pub fn show_console(ui: &mut Ui, state: &mut AppState, actions: &mut Vec<Action>) {
     egui::ScrollArea::vertical().stick_to_bottom(true).max_height(ui.available_height() - 36.0).show(ui, |ui| {
         for line in &state.console_output {
-            ui.monospace(RichText::new(line.clone()).color(if line.starts_with("[!]") {
-                egui::Color32::from_rgb(0xff, 0x6a, 0x6a)
-            } else if line.starts_with("[event]") {
-                color::ACCENT
-            } else { color::TEXT }));
+            ui.label(crate::gui::widgets::disasm_syntax::console_line_job(line, 13.0));
         }
     });
     ui.separator();

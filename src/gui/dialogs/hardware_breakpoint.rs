@@ -18,7 +18,7 @@ pub fn show(ctx: &Context, state: &mut AppState, _actions: &mut Vec<Action>) {
             ui.add(egui::TextEdit::singleline(&mut addr).desired_width(220.0).hint_text("0x401000"));
             ui.end_row();
             ui.label("Type:");
-            egui::ComboBox::from_id_source("hwbp_kind_cb")
+            egui::ComboBox::from_id_salt("hwbp_kind_cb")
                 .selected_text(match kind { 0 => "Execute", 1 => "Read", 2 => "Write", _ => "Access (R/W)" })
                 .show_ui(ui, |ui| {
                     ui.selectable_value(&mut kind, 0, "Execute");
@@ -28,7 +28,7 @@ pub fn show(ctx: &Context, state: &mut AppState, _actions: &mut Vec<Action>) {
                 });
             ui.end_row();
             ui.label("Size:");
-            egui::ComboBox::from_id_source("hwbp_size_cb")
+            egui::ComboBox::from_id_salt("hwbp_size_cb")
                 .selected_text(format!("{size}"))
                 .show_ui(ui, |ui| {
                     for s in [1u8, 2, 4, 8] {
