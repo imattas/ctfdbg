@@ -343,6 +343,22 @@ pub fn auto_decode(data: &[u8], max_depth: usize) -> Vec<DecodeStep> {
     steps
 }
 
+// ------------------------------------------------------------------- JWT ---
+
+/// Decode a JWT's header and payload (the two Base64URL segments before the
+/// signature). Returns `(header, payload)` as UTF-8 strings.
+pub fn jwt_decode(token: &str) -> Option<(String, String)> {
+    let mut parts = token.trim().split('.');
+    let header_b64 = parts.next()?;
+    let payload_b64 = parts.next()?;
+    let header = base64_decode(header_b64)?;
+    let payload = base64_decode(payload_b64)?;
+    Some((
+        String::from_utf8_lossy(&header).into_owned(),
+        String::from_utf8_lossy(&payload).into_owned(),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -383,6 +399,17 @@ mod tests {
         let raw = b"a b&c=/?";
         let e = url_encode(raw);
         assert_eq!(url_decode(&e).unwrap(), raw);
+    }
+
+    #[test]
+    fn jwt_decodes_header_and_payload() {
+        // header {"alg":"HS256","typ":"JWT"} . payload {"sub":"1","admin":true} . sig
+        let h = base64url_encode(br#"{"alg":"HS256","typ":"JWT"}"#);
+        let p = base64url_encode(br#"{"sub":"1","admin":true}"#);
+        let token = format!("{h}.{p}.sigsig");
+        let (hd, pl) = jwt_decode(&token).unwrap();
+        assert!(hd.contains("HS256"));
+        assert!(pl.contains("admin"));
     }
 
     #[test]

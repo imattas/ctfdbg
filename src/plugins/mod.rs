@@ -141,6 +141,20 @@ pub fn default_plugins() -> PluginRegistry {
     // Pwn
     r.register(builtins::GadgetPlugin);
     r.register(builtins::SyscallSitesPlugin);
+    r.register(builtins::RevShellPlugin);
+    r.register(builtins::RopChainPlugin);
+    r.register(builtins::NopSledPlugin);
+    r.register(builtins::XorEncodePlugin);
+    // Reverse engineering
+    r.register(builtins::SyscallPlugin);
+    r.register(builtins::SyscallTablePlugin);
+    r.register(builtins::XrefPlugin);
+    r.register(builtins::CfgPlugin);
+    r.register(builtins::CallGraphPlugin);
+    // Crypto / Utility
+    r.register(builtins::JwtPlugin);
+    r.register(builtins::BaseConvertPlugin);
+    r.register(builtins::CidrPlugin);
     r
 }
 

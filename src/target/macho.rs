@@ -22,7 +22,17 @@ pub fn parse_macho(bytes: &[u8], path: Option<std::path::PathBuf>) -> DbgResult<
         }
     };
 
-    let arch = if macho.is_64 { Architecture::X86_64 } else { Architecture::X86 };
+    // Detect architecture from the Mach-O cputype.
+    use goblin::mach::constants::cputype::*;
+    let arch = match macho.header.cputype {
+        CPU_TYPE_X86_64 => Architecture::X86_64,
+        CPU_TYPE_X86 => Architecture::X86,
+        CPU_TYPE_ARM64 | CPU_TYPE_ARM64_32 => Architecture::AArch64,
+        CPU_TYPE_ARM => Architecture::Arm,
+        CPU_TYPE_POWERPC64 => Architecture::PowerPc64,
+        CPU_TYPE_POWERPC => Architecture::PowerPc,
+        _ => if macho.is_64 { Architecture::X86_64 } else { Architecture::X86 },
+    };
 
     Ok(BinaryInfo {
         path,

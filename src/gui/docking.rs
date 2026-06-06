@@ -21,6 +21,7 @@ pub enum PanelKind {
     Functions,
     Strings,
     Plugins,
+    Graph,
 }
 
 impl PanelKind {
@@ -39,6 +40,7 @@ impl PanelKind {
         PanelKind::Functions,
         PanelKind::Strings,
         PanelKind::Plugins,
+        PanelKind::Graph,
     ];
 
     pub fn title(self) -> &'static str {
@@ -57,6 +59,7 @@ impl PanelKind {
             PanelKind::Functions        => "Functions",
             PanelKind::Strings          => "Strings",
             PanelKind::Plugins          => "Plugins",
+            PanelKind::Graph            => "Graph",
         }
     }
 }
@@ -133,6 +136,7 @@ impl<'a> egui_dock::TabViewer for PanelTabs<'a> {
             PanelKind::Functions        => crate::gui::panels::functions::show(ui, self.state, self.actions),
             PanelKind::Strings          => crate::gui::panels::strings::show(ui, self.state, self.actions),
             PanelKind::Plugins          => crate::gui::panels::plugins::show(ui, self.state, self.actions),
+            PanelKind::Graph            => crate::gui::panels::graph::show(ui, self.state, self.actions),
         }
     }
 }

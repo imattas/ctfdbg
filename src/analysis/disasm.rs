@@ -16,6 +16,7 @@ use crate::error::{DbgError, DbgResult};
 use crate::target::arch::{Architecture, Endian};
 use crate::target::bfd::{self, CsFamily, CsMode, CsTarget};
 
+#[derive(Debug, Clone)]
 pub struct DisasmInsn {
     pub address: u64,
     pub bytes: Vec<u8>,

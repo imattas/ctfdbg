@@ -230,6 +230,24 @@ lines are highlighted the same way as the disassembly panel.
 | `hexdump`       | Pwn           | Hex/ASCII dump of the memory window                  |
 | `disasm`        | Analysis      | Disassemble at an address                            |
 | `shellcode-list`| Pwn           | List bundled educational shellcode templates         |
+| `revshell`      | Pwn           | Reverse/bind shell one-liners + listeners (`<ip> <port> [bind]`) |
+| `ropchain`      | Pwn           | Auto-build an `execve("/bin/sh")` ROP chain from the binary |
+| `nop-sled`      | Pwn           | Architecture-appropriate NOP sled                    |
+| `xor-encode`    | Deobfuscation | XOR the memory window with a key                     |
+| `syscall`       | Reverse Eng.  | Linux syscall name↔number lookup (per arch)          |
+| `syscall-table` | Reverse Eng.  | List the Linux syscall table for an arch             |
+| `xref`          | Reverse Eng.  | Find code references (calls/jumps) to an address     |
+| `cfg`           | Reverse Eng.  | Print the basic blocks + edges of a function         |
+| `callgraph`     | Reverse Eng.  | List call edges in the executable section            |
+| `jwt`           | Crypto        | Decode a JWT header/payload                           |
+| `base`          | Utility       | Show a value in dec/hex/oct/bin/ASCII                |
+| `cidr`          | Utility       | Expand a CIDR (network/broadcast/mask/hosts)         |
+
+### IDA/Ghidra-style analysis
+- **Jump arrows** in the disassembly gutter showing where branches go (coloured by conditional/unconditional, with collision-free lanes).
+- **Graph** panel: block-structured control-flow graph of the current function with clickable branch / fall-through edges.
+- Right-click an instruction for **Find XRefs**, **Control-flow graph from here**, and **Follow branch →**.
+- **Cross-references** and **call-graph** recovery via linear disassembly.
 
 ## Known limitations / TODOs
 
