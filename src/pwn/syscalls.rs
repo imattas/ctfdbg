@@ -74,6 +74,9 @@ pub fn number(name: &str, arch: Architecture) -> Option<i32> {
 
 /// Look up the syscall name for a number on an architecture.
 pub fn name(num: i32, arch: Architecture) -> Option<&'static str> {
+    if num < 0 {
+        return None; // -1 is the "absent on this arch" sentinel, not a syscall
+    }
     TABLE.iter().find(|r| num_for(r, arch) == num).map(|r| r.name)
 }
 
@@ -104,6 +107,8 @@ mod tests {
         assert_eq!(name(59, Architecture::X86_64), Some("execve"));
         // open does not exist on aarch64 (openat only).
         assert_eq!(number("open", Architecture::AArch64), None);
+        // The -1 "absent" sentinel must never resolve to a name.
+        assert_eq!(name(-1, Architecture::X86_64), None);
     }
 
     #[test]

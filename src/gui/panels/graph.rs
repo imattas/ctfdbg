@@ -5,7 +5,6 @@ use egui::{RichText, Ui};
 
 use crate::analysis::cfg::{build_cfg, EdgeKind};
 use crate::analysis::disasm::Disassembler;
-use crate::analysis::flow::{classify, FlowKind};
 use crate::gui::actions::Action;
 use crate::gui::panels::disassembly::read_bytes_for_disasm;
 use crate::gui::state::AppState;
@@ -31,16 +30,10 @@ pub fn show(ui: &mut Ui, state: &mut AppState, actions: &mut Vec<Action>) {
         Ok(d) => d,
         Err(e) => { ui.label(format!("disasm init failed: {e}")); return; }
     };
-    let all = dis.disassemble_all(&bytes, addr).unwrap_or_default();
-    // Collect instructions up to (and including) the first return.
-    let mut func = Vec::new();
-    for ins in all {
-        let is_ret = classify(&ins.mnemonic) == FlowKind::Return;
-        func.push(crate::pwn::asm::DisasmInsn {
-            address: ins.address, bytes: ins.bytes, mnemonic: ins.mnemonic, operands: ins.op_str,
-        });
-        if is_ret || func.len() >= 1024 { break; }
-    }
+    let conv: Vec<crate::pwn::asm::DisasmInsn> =
+        dis.disassemble_all(&bytes, addr).unwrap_or_default().into_iter().map(Into::into).collect();
+    // Walk the function body, following forward branches past early returns.
+    let func = crate::analysis::cfg::function_slice(&conv, addr, 1024);
     if func.is_empty() {
         ui.label(RichText::new("(no instructions to graph here)").color(color::MUTED));
         return;

@@ -35,9 +35,7 @@ pub fn show(ui: &mut Ui, state: &mut AppState, actions: &mut Vec<Action>) {
         state.breakpoints.iter().filter(|b| b.enabled).map(|b| b.address).collect();
 
     // Branch-arrow layout (IDA/Ghidra-style gutter showing where jumps go).
-    let conv: Vec<crate::pwn::asm::DisasmInsn> = insns.iter().map(|i| crate::pwn::asm::DisasmInsn {
-        address: i.address, bytes: i.bytes.clone(), mnemonic: i.mnemonic.clone(), operands: i.op_str.clone(),
-    }).collect();
+    let conv: Vec<crate::pwn::asm::DisasmInsn> = insns.iter().cloned().map(Into::into).collect();
     let (arrows, lanes) = flow::compute_arrows(&conv);
     let gutter_w = if lanes > 0 { lanes as f32 * 7.0 + 8.0 } else { 0.0 };
 
@@ -94,9 +92,7 @@ pub fn show(ui: &mut Ui, state: &mut AppState, actions: &mut Vec<Action>) {
                         actions.push(Action::ConsoleCommand(format!("cfg 0x{:x}", ins.address)));
                         ui.close_menu();
                     }
-                    if let Some(t) = flow::branch_target(&crate::pwn::asm::DisasmInsn {
-                        address: ins.address, bytes: ins.bytes.clone(), mnemonic: ins.mnemonic.clone(), operands: ins.op_str.clone(),
-                    }) {
+                    if let Some(t) = flow::branch_target(&ins.clone().into()) {
                         if ui.button(format!("Follow branch \u{2192} 0x{t:x}")).clicked() {
                             actions.push(Action::NavigateTo(t));
                             ui.close_menu();
@@ -144,43 +140,35 @@ pub fn show(ui: &mut Ui, state: &mut AppState, actions: &mut Vec<Action>) {
 }
 
 pub(crate) fn read_bytes_for_disasm(state: &AppState, address: u64, len: usize) -> Vec<u8> {
-    // First try live process via memory cache from latest event - we don't keep one,
-    // so fall back to binary file content based on RVA.
-    if let Some(b) = &state.binary {
+    // Map the virtual address to a section file offset and slice the already
+    // loaded image bytes (no per-frame disk read).
+    if let (Some(b), Some(file_bytes)) = (&state.binary, &state.binary_bytes) {
         let base = b.loaded_image_base.max(b.preferred_image_base);
         if address >= base && address < base + b.raw_size + 0x1000 {
-            // Try to map address to a section file offset.
             for s in &b.sections {
                 if address >= s.virtual_address && address < s.virtual_address + s.virtual_size.max(s.file_size) {
-                    let rva_off = address - s.virtual_address;
-                    let file_off = (s.file_offset + rva_off) as usize;
-                    if let Some(path) = &b.path {
-                        if let Ok(file_bytes) = std::fs::read(path) {
-                            let end = (file_off + len).min(file_bytes.len());
-                            if file_off < end {
-                                return file_bytes[file_off..end].to_vec();
-                            }
-                        }
+                    let file_off = (s.file_offset + (address - s.virtual_address)) as usize;
+                    let end = (file_off + len).min(file_bytes.len());
+                    if file_off < end {
+                        return file_bytes[file_off..end].to_vec();
                     }
                 }
             }
         }
     }
-    // Last resort: empty
-    vec![0u8; 0]
+    Vec::new()
 }
 
 fn symbol_label(state: &AppState, ins: &crate::analysis::disasm::DisasmInsn) -> Option<String> {
-    if !(ins.mnemonic == "call" || ins.mnemonic.starts_with('j')) { return None; }
-    let target = ins.op_str.trim().trim_start_matches("0x");
-    let target_addr = u64::from_str_radix(target, 16).ok()?;
-    if let Some(b) = &state.binary {
-        if let Some(s) = b.symbols.iter().find(|s| s.address == target_addr) {
-            return Some(s.name.clone());
-        }
-        if let Some(m) = state.modules.iter().find(|m| m.contains(target_addr)) {
-            return Some(format!("{}+0x{:x}", m.name, target_addr - m.base));
-        }
+    // Reuse the shared branch-target resolver (handles indirect/bracketed
+    // operands correctly) instead of re-parsing the operand string by hand.
+    let target = flow::branch_target(&ins.clone().into())?;
+    let b = state.binary.as_ref()?;
+    if let Some(s) = b.symbols.iter().find(|s| s.address == target) {
+        return Some(s.name.clone());
+    }
+    if let Some(m) = state.modules.iter().find(|m| m.contains(target)) {
+        return Some(format!("{}+0x{:x}", m.name, target - m.base));
     }
     None
 }

@@ -37,6 +37,37 @@ impl Cfg {
     }
 }
 
+/// Extract the instructions of the function starting at `start` from an
+/// address-ordered instruction stream.
+///
+/// Unlike "stop at the first `ret`", this follows forward branch targets: a
+/// terminator only ends the function once we've passed every forward branch
+/// destination seen so far, so functions with early returns keep their later
+/// blocks (and the edges into them). Bounded by `cap` instructions.
+pub fn function_slice(insns: &[DisasmInsn], start: u64, cap: usize) -> Vec<DisasmInsn> {
+    let mut out = Vec::new();
+    let mut furthest = start;
+    for ins in insns.iter().filter(|i| i.address >= start) {
+        let kind = classify(&ins.mnemonic);
+        if let Some(t) = branch_target(ins) {
+            if t > furthest {
+                furthest = t;
+            }
+        }
+        let addr = ins.address;
+        out.push(ins.clone());
+        if out.len() >= cap {
+            break;
+        }
+        // A terminator (return / unconditional / indirect) only ends the
+        // function once we're past all pending forward branch targets.
+        if matches!(kind, FlowKind::Return | FlowKind::Jump | FlowKind::Indirect) && addr >= furthest {
+            break;
+        }
+    }
+    out
+}
+
 /// Build a CFG from address-ordered instructions (e.g. one function's body).
 pub fn build_cfg(insns: &[DisasmInsn]) -> Cfg {
     if insns.is_empty() {
@@ -167,5 +198,21 @@ mod tests {
 
         // ret block has no successors
         assert!(cfg.block_at(0x14).unwrap().succ.is_empty());
+    }
+
+    #[test]
+    fn function_slice_follows_forward_branch_past_early_ret() {
+        // 0: je 0x10 ; 4: ret (early) ; 10: mov ; 14: ret
+        let insns = vec![
+            insn(0x0, 2, "je", "0x10"),
+            insn(0x4, 1, "ret", ""),
+            insn(0x10, 2, "mov", "eax, 1"),
+            insn(0x14, 1, "ret", ""),
+        ];
+        let slice = super::function_slice(&insns, 0x0, 1024);
+        // Must include the 0x10 block reached only via the forward branch,
+        // not stop at the early ret at 0x4.
+        assert!(slice.iter().any(|i| i.address == 0x10));
+        assert!(slice.iter().any(|i| i.address == 0x14));
     }
 }

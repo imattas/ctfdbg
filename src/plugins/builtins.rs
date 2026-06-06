@@ -829,7 +829,10 @@ impl Plugin for SyscallPlugin {
         };
         let arch = parts.next().map(crate::target::arch::Architecture::parse).unwrap_or_else(|| arch_of(state));
         let out = PluginOutput::default();
-        if let Some(num) = parse_num(key).filter(|_| key.chars().all(|c| c.is_ascii_digit() || c == 'x' || c.is_ascii_hexdigit())) {
+        // Treat the key as a number only when it is `0x..`-prefixed or all
+        // decimal digits — so hex-letter names (e.g. "fd") are looked up by name.
+        let is_numeric = key.starts_with("0x") || key.starts_with("0X") || key.bytes().all(|b| b.is_ascii_digit());
+        if let Some(num) = parse_num(key).filter(|_| is_numeric) {
             // numeric -> name
             match crate::pwn::syscalls::name(num as i32, arch) {
                 Some(n) => out.line(format!("{} syscall #{} = {}", arch, num, n)),
@@ -1022,8 +1025,16 @@ impl Plugin for XorEncodePlugin {
         if state.memory_bytes.is_empty() {
             return PluginOutput::default().line("[!] memory window empty");
         }
-        let key: Vec<u8> = key_arg.strip_prefix("0x").and_then(|h| hex::decode(h).ok())
-            .unwrap_or_else(|| key_arg.as_bytes().to_vec());
+        // `0x..` is parsed as hex (erroring on bad hex); anything else is a
+        // literal ASCII key.
+        let key: Vec<u8> = if let Some(h) = key_arg.strip_prefix("0x").or_else(|| key_arg.strip_prefix("0X")) {
+            match hex::decode(h) {
+                Ok(k) => k,
+                Err(_) => return PluginOutput::default().line("[!] invalid hex key (expected 0x<even-length hex>)"),
+            }
+        } else {
+            key_arg.as_bytes().to_vec()
+        };
         let enc = crate::pwn::xor::xor(&state.memory_bytes, &key);
         let hexs: String = enc.iter().take(256).map(|b| format!("{b:02x}")).collect();
         PluginOutput::default()
@@ -1111,13 +1122,8 @@ impl Plugin for CfgPlugin {
             Ok(v) => v,
             Err(e) => return PluginOutput::default().line(format!("[!] {e}")),
         };
-        // Take instructions from `addr` up to (and including) the first ret.
-        let mut func: Vec<_> = Vec::new();
-        for ins in all.into_iter().filter(|i| i.address >= addr) {
-            let is_ret = crate::analysis::flow::classify(&ins.mnemonic) == crate::analysis::flow::FlowKind::Return;
-            func.push(ins);
-            if is_ret || func.len() >= 512 { break; }
-        }
+        // Walk the function body, following forward branches past early returns.
+        let func = crate::analysis::cfg::function_slice(&all, addr, 1024);
         if func.is_empty() {
             return PluginOutput::default().line("[!] no instructions at that address");
         }
@@ -1155,11 +1161,13 @@ impl Plugin for CallGraphPlugin {
             }
         }
         let calls: Vec<_> = all.iter().filter(|x| x.kind == crate::analysis::xref::XrefKind::Call).collect();
+        // Resolve callee symbols via a one-time address->name map.
+        let syms: std::collections::HashMap<u64, &str> = state.binary.as_ref()
+            .map(|b| b.symbols.iter().map(|s| (s.address, s.name.as_str())).collect())
+            .unwrap_or_default();
         let mut out = PluginOutput::default().line(format!("{} call edge(s):", calls.len()));
         for x in calls.iter().take(limit) {
-            let sym = state.binary.as_ref()
-                .and_then(|b| b.symbols.iter().find(|s| s.address == x.to))
-                .map(|s| format!("  ; {}", s.name)).unwrap_or_default();
+            let sym = syms.get(&x.to).map(|n| format!("  ; {n}")).unwrap_or_default();
             out = out.line(format!("  0x{:016x} -> 0x{:016x}{}", x.from, x.to, sym));
         }
         out

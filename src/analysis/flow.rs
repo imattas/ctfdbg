@@ -75,6 +75,12 @@ pub fn branch_target(insn: &DisasmInsn) -> Option<u64> {
     if !matches!(kind, FlowKind::Jump | FlowKind::CondJump | FlowKind::Call) {
         return None;
     }
+    // Memory / register-indirect branches (`jmp qword ptr [rip+0x..]`,
+    // `call [rax]`) have no statically-known target — any hex inside the
+    // brackets is a displacement, not the destination.
+    if insn.operands.contains('[') {
+        return None;
+    }
     // Find the first token that looks like an absolute hex address. capstone
     // resolves relative branches to absolute targets in the operand string.
     for raw in insn.operands.split(|c: char| c == ',' || c.is_whitespace()) {
@@ -183,6 +189,9 @@ mod tests {
         assert_eq!(branch_target(&insn(0x1000, "jmp", "rax")), None);
         assert_eq!(branch_target(&insn(0x1000, "mov", "rax, 0x10")), None); // not a branch
         assert_eq!(branch_target(&insn(0x1000, "b", "#0x2000")), Some(0x2000));
+        // Memory-indirect branch: displacement is not a target.
+        assert_eq!(branch_target(&insn(0x1000, "jmp", "qword ptr [rip + 0x2f1a]")), None);
+        assert_eq!(branch_target(&insn(0x1000, "call", "qword ptr [rax + 0x10]")), None);
     }
 
     #[test]
