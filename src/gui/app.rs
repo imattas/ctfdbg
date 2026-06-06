@@ -44,10 +44,10 @@ impl App {
                     | DebuggerEvent::Exception { thread_id, address, .. } => {
                         self.state.active_thread = Some(*thread_id);
                         if self.state.disasm_following_pc {
-                            self.state.disasm_address = *address;
-                            self.state.disasm_scroll_to = Some(*address);
+                            self.state.navigate_disasm(*address);
+                        } else {
+                            self.state.selected_address = Some(*address);
                         }
-                        self.state.selected_address = Some(*address);
                     }
                     DebuggerEvent::ProcessExited { .. } => {
                         self.state.state = TargetState::Exited;

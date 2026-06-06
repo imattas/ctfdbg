@@ -17,6 +17,20 @@ pub struct Section {
     pub executable: bool,
 }
 
+impl Section {
+    /// In-memory span of the section. Uses the larger of the virtual and file
+    /// sizes so file-less tails (e.g. `.bss`) are still covered.
+    pub fn virtual_span(&self) -> u64 {
+        self.virtual_size.max(self.file_size)
+    }
+
+    /// Whether `addr` falls within this section's mapped range.
+    pub fn contains(&self, addr: u64) -> bool {
+        let span = self.virtual_span();
+        span != 0 && addr >= self.virtual_address && addr < self.virtual_address + span
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Symbol {
     pub name: String,
@@ -77,6 +91,22 @@ pub struct BinaryInfo {
     pub relocations: Vec<RelocationEntry>,
     pub security: SecurityFeatures,
     pub raw_size: u64,
+}
+
+impl BinaryInfo {
+    /// The section whose mapped range contains `addr`, if any.
+    pub fn section_containing(&self, addr: u64) -> Option<&Section> {
+        self.sections.iter().find(|s| s.contains(addr))
+    }
+
+    /// Resolve a symbol or export *name* to its address.
+    pub fn address_of_name(&self, name: &str) -> Option<u64> {
+        self.symbols
+            .iter()
+            .find(|s| s.name == name)
+            .map(|s| s.address)
+            .or_else(|| self.exports.iter().find(|e| e.name == name).map(|e| e.address))
+    }
 }
 
 impl Default for BinaryInfo {

@@ -237,12 +237,7 @@ fn resolve_goto(state: &AppState, text: &str) -> Option<u64> {
     if let Some(a) = parse_hex(t) {
         return Some(a);
     }
-    let b = state.binary.as_ref()?;
-    b.symbols
-        .iter()
-        .find(|s| s.name == t)
-        .map(|s| s.address)
-        .or_else(|| b.exports.iter().find(|e| e.name == t).map(|e| e.address))
+    state.binary.as_ref()?.address_of_name(t)
 }
 
 /// Row index to scroll to for `addr`: exact match if it is an instruction
@@ -256,30 +251,13 @@ fn nearest_row(view: &DisasmView, addr: u64) -> Option<usize> {
         .position(|i| addr >= i.address && addr < i.address + (i.bytes.len().max(1)) as u64)
 }
 
-pub(crate) fn read_bytes_for_disasm(state: &AppState, address: u64, len: usize) -> Vec<u8> {
-    // Map the virtual address to a section file offset and slice the already
-    // loaded image bytes (no per-frame disk read). The per-section range check
-    // is the only bound we need — an outer image-base/raw-size guard wrongly
-    // rejects normal ELF sections that live at high virtual addresses.
-    if let (Some(b), Some(file_bytes)) = (&state.binary, &state.binary_bytes) {
-        for s in &b.sections {
-            if address >= s.virtual_address && address < s.virtual_address + s.virtual_size.max(s.file_size) {
-                let file_off = (s.file_offset + (address - s.virtual_address)) as usize;
-                let end = (file_off + len).min(file_bytes.len());
-                if file_off < end {
-                    return file_bytes[file_off..end].to_vec();
-                }
-            }
-        }
-    }
-    Vec::new()
-}
-
 fn symbol_label(state: &AppState, ins: &crate::analysis::disasm::DisasmInsn) -> Option<String> {
     // Reuse the shared branch-target resolver (handles indirect/bracketed
     // operands correctly) instead of re-parsing the operand string by hand.
     let target = flow::branch_target(&ins.clone().into())?;
     let b = state.binary.as_ref()?;
+    // Exact match only: a branch comment should name the symbol *at* the
+    // target, not the nearest preceding one.
     if let Some(s) = b.symbols.iter().find(|s| s.address == target) {
         return Some(s.name.clone());
     }

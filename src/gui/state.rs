@@ -243,8 +243,9 @@ impl AppState {
         ) {
             Ok(info) => {
                 let bytes = std::fs::read(&path).unwrap_or_default();
-                self.disasm_address = info.entry_point;
-                self.disasm_scroll_to = Some(info.entry_point);
+                self.navigate_disasm(info.entry_point);
+                // Drop any cache from a previously loaded binary; the new image
+                // may reuse the same arch/addresses with different bytes.
                 self.disasm_cache = None;
                 self.adapter_target.executable = Some(path.clone());
                 self.cfg.target = Some(path);
@@ -301,17 +302,39 @@ impl AppState {
         let arch = self.binary.as_ref().map(|b| b.architecture).unwrap_or(Architecture::X86_64);
         let addr = self.disasm_address;
         if let Some(c) = &self.disasm_cache {
-            if c.arch == arch && addr >= c.region_start && addr < c.region_end && !c.insns.is_empty() {
+            // `build_disasm_view` never stores an empty view, so an in-range
+            // hit on the same arch is always reusable.
+            if c.arch == arch && addr >= c.region_start && addr < c.region_end {
                 return;
             }
         }
         self.disasm_cache = self.build_disasm_view(arch, addr);
     }
 
+    /// Slice already-loaded image bytes for the virtual range
+    /// `[addr, addr + len)`, mapping through the section that contains `addr`.
+    /// Returns empty when the address isn't backed by file bytes. This is the
+    /// single place the GUI turns a virtual address into image bytes.
+    pub fn image_bytes(&self, addr: u64, len: usize) -> Vec<u8> {
+        let (Some(b), Some(file_bytes)) = (&self.binary, &self.binary_bytes) else {
+            return Vec::new();
+        };
+        let Some(s) = b.section_containing(addr) else {
+            return Vec::new();
+        };
+        let file_off = (s.file_offset + (addr - s.virtual_address)) as usize;
+        let end = (file_off + len).min(file_bytes.len());
+        if file_off < end {
+            file_bytes[file_off..end].to_vec()
+        } else {
+            Vec::new()
+        }
+    }
+
     /// Disassemble the whole contiguous region containing `addr` in one pass.
     fn build_disasm_view(&self, arch: Architecture, addr: u64) -> Option<DisasmView> {
         let (start, len) = self.disasm_region(addr);
-        let bytes = crate::gui::panels::disassembly::read_bytes_for_disasm(self, start, len);
+        let bytes = self.image_bytes(start, len);
         if bytes.is_empty() {
             return None;
         }
@@ -336,23 +359,18 @@ impl AppState {
         // Cap a single decoded region so a pathologically large section can't
         // stall the UI; 4 MiB of code is far more than any CTF target.
         const MAX_REGION: u64 = 4 * 1024 * 1024;
-        if let Some(b) = &self.binary {
-            for s in &b.sections {
-                let size = s.virtual_size.max(s.file_size);
-                if size != 0 && addr >= s.virtual_address && addr < s.virtual_address + size {
-                    if size <= MAX_REGION {
-                        return (s.virtual_address, size as usize);
-                    }
-                    // Oversized section: decode a MAX_REGION window that still
-                    // contains `addr`, clamped to the section bounds, so the
-                    // target is always inside the cached region.
-                    let half = MAX_REGION / 2;
-                    let lo = addr.saturating_sub(half).max(s.virtual_address);
-                    let hi = (s.virtual_address + size - MAX_REGION).max(s.virtual_address);
-                    let start = lo.min(hi);
-                    return (start, MAX_REGION as usize);
-                }
+        if let Some(s) = self.binary.as_ref().and_then(|b| b.section_containing(addr)) {
+            let size = s.virtual_span();
+            if size <= MAX_REGION {
+                return (s.virtual_address, size as usize);
             }
+            // Oversized section: decode a MAX_REGION window that still contains
+            // `addr`, clamped to the section bounds.
+            let start = addr
+                .saturating_sub(MAX_REGION / 2)
+                .max(s.virtual_address)
+                .min(s.virtual_address + size - MAX_REGION);
+            return (start, MAX_REGION as usize);
         }
         (addr, 4096)
     }
