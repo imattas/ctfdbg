@@ -320,10 +320,12 @@ impl AppState {
         if insns.is_empty() {
             return None;
         }
-        let region_end = insns
-            .last()
-            .map(|i| i.address + i.bytes.len() as u64)
-            .unwrap_or(start + len as u64);
+        // The cache is authoritative for the whole requested window, not just
+        // the decoded/file-backed prefix. Otherwise an undecodable byte
+        // mid-section, or a section whose virtual size exceeds its file size
+        // (a file-less tail), would make navigation into that range re-decode
+        // every frame.
+        let region_end = start + len as u64;
         let row_of = insns.iter().enumerate().map(|(i, ins)| (ins.address, i)).collect();
         Some(DisasmView { arch, region_start: start, region_end, insns, row_of })
     }
@@ -338,7 +340,17 @@ impl AppState {
             for s in &b.sections {
                 let size = s.virtual_size.max(s.file_size);
                 if size != 0 && addr >= s.virtual_address && addr < s.virtual_address + size {
-                    return (s.virtual_address, size.min(MAX_REGION) as usize);
+                    if size <= MAX_REGION {
+                        return (s.virtual_address, size as usize);
+                    }
+                    // Oversized section: decode a MAX_REGION window that still
+                    // contains `addr`, clamped to the section bounds, so the
+                    // target is always inside the cached region.
+                    let half = MAX_REGION / 2;
+                    let lo = addr.saturating_sub(half).max(s.virtual_address);
+                    let hi = (s.virtual_address + size - MAX_REGION).max(s.virtual_address);
+                    let start = lo.min(hi);
+                    return (start, MAX_REGION as usize);
                 }
             }
         }
