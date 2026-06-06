@@ -141,17 +141,16 @@ pub fn show(ui: &mut Ui, state: &mut AppState, actions: &mut Vec<Action>) {
 
 pub(crate) fn read_bytes_for_disasm(state: &AppState, address: u64, len: usize) -> Vec<u8> {
     // Map the virtual address to a section file offset and slice the already
-    // loaded image bytes (no per-frame disk read).
+    // loaded image bytes (no per-frame disk read). The per-section range check
+    // is the only bound we need — an outer image-base/raw-size guard wrongly
+    // rejects normal ELF sections that live at high virtual addresses.
     if let (Some(b), Some(file_bytes)) = (&state.binary, &state.binary_bytes) {
-        let base = b.loaded_image_base.max(b.preferred_image_base);
-        if address >= base && address < base + b.raw_size + 0x1000 {
-            for s in &b.sections {
-                if address >= s.virtual_address && address < s.virtual_address + s.virtual_size.max(s.file_size) {
-                    let file_off = (s.file_offset + (address - s.virtual_address)) as usize;
-                    let end = (file_off + len).min(file_bytes.len());
-                    if file_off < end {
-                        return file_bytes[file_off..end].to_vec();
-                    }
+        for s in &b.sections {
+            if address >= s.virtual_address && address < s.virtual_address + s.virtual_size.max(s.file_size) {
+                let file_off = (s.file_offset + (address - s.virtual_address)) as usize;
+                let end = (file_off + len).min(file_bytes.len());
+                if file_off < end {
+                    return file_bytes[file_off..end].to_vec();
                 }
             }
         }
