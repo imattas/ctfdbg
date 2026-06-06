@@ -6,7 +6,6 @@ use egui::{RichText, Ui};
 use crate::analysis::cfg::{build_cfg, EdgeKind};
 use crate::analysis::disasm::Disassembler;
 use crate::gui::actions::Action;
-use crate::gui::panels::disassembly::read_bytes_for_disasm;
 use crate::gui::state::AppState;
 use crate::gui::theme::color;
 use crate::gui::widgets::disasm_syntax;
@@ -21,7 +20,7 @@ pub fn show(ui: &mut Ui, state: &mut AppState, actions: &mut Vec<Action>) {
     ui.separator();
 
     let arch = state.binary.as_ref().map(|b| b.architecture).unwrap_or(Architecture::X86_64);
-    let bytes = read_bytes_for_disasm(state, addr, 4096);
+    let bytes = state.image_bytes(addr, 4096);
     if bytes.is_empty() {
         ui.label(RichText::new("(load a binary or stop the target to graph a function)").color(color::MUTED));
         return;

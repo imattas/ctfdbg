@@ -9,7 +9,7 @@ use crate::gui::theme::color;
 pub fn show(ui: &mut Ui, state: &mut AppState, actions: &mut Vec<Action>) {
     ui.horizontal(|ui| {
         ui.label("Filter:");
-        ui.text_edit_singleline(&mut state.modules_search); // reuse existing search buffer
+        ui.text_edit_singleline(&mut state.strings_search);
         if ui.button("Re-scan").clicked() {
             state.rerun_auto_analysis();
         }
@@ -20,7 +20,7 @@ pub fn show(ui: &mut Ui, state: &mut AppState, actions: &mut Vec<Action>) {
         ui.label(RichText::new("Load a binary to populate.").color(color::MUTED));
         return;
     };
-    let needle = state.modules_search.to_ascii_lowercase();
+    let needle = state.strings_search.to_ascii_lowercase();
 
     egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
         use egui_extras::{Column, TableBuilder};

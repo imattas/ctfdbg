@@ -83,14 +83,12 @@ pub fn execute(state: &mut AppState, line: &str) {
                 let arg = arg.trim_start_matches('*');
                 if let Ok(addr) = parse_u64(arg) {
                     state.send(DebugCommand::SetBreakpoint(addr));
-                } else if let Some(b) = &state.binary {
-                    if let Some(s) = b.symbols.iter().find(|s| s.name == arg) {
-                        state.send(DebugCommand::SetBreakpoint(s.address));
-                    } else {
-                        state.console_output.push(format!("[!] symbol not found: {arg}"));
-                    }
-                } else {
+                } else if state.binary.is_none() {
                     state.console_output.push("[!] no binary or address".into());
+                } else if let Some(addr) = state.binary.as_ref().and_then(|b| b.address_of_name(arg)) {
+                    state.send(DebugCommand::SetBreakpoint(addr));
+                } else {
+                    state.console_output.push(format!("[!] symbol not found: {arg}"));
                 }
             }
             Command::Delete(id) => state.send(DebugCommand::RemoveBreakpoint(id)),
@@ -171,7 +169,7 @@ pub fn execute(state: &mut AppState, line: &str) {
                 }
             }
             Command::Disasm(addr) => {
-                if let Ok(a) = parse_u64(&addr) { state.disasm_address = a; }
+                if let Ok(a) = parse_u64(&addr) { state.navigate_disasm(a); }
             }
             Command::Search(pat) => {
                 for line in search_loaded(state, &pat) {

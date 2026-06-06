@@ -12,8 +12,10 @@ use crate::debugger::state::TargetState;
 use crate::debugger::threads::DebugThread;
 use crate::error::DbgResult;
 use crate::analysis::auto::AutoAnalysis;
+use crate::analysis::disasm::{DisasmInsn, Disassembler};
 use crate::gui::docking::{default_layout, PanelKind};
 use crate::plugins::PluginRegistry;
+use crate::target::arch::Architecture;
 use crate::target::binary::BinaryInfo;
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
@@ -63,6 +65,8 @@ pub enum BackendUpdate {
     Breakpoints(Vec<BreakpointInfo>),
     StackTrace(Vec<StackFrame>),
     MemoryAt(u64, Vec<u8>),
+    /// Stack memory captured at the current stack pointer after a stop.
+    StackBytes(u64, Vec<u8>),
     /// Bytes captured from the target's stdout/stderr.
     TargetOutput(Vec<u8>),
     Log(String),
@@ -72,6 +76,19 @@ pub enum BackendUpdate {
 pub struct LogLine {
     pub level: tracing::Level,
     pub text: String,
+}
+
+/// A cached linear disassembly of one contiguous region (typically the
+/// executable section containing the current address). Built once and reused
+/// across frames so the disassembly panel can scroll the *entire* region
+/// without re-decoding every frame.
+pub struct DisasmView {
+    pub arch: Architecture,
+    pub region_start: u64,
+    pub region_end: u64,
+    pub insns: Vec<DisasmInsn>,
+    /// Maps an instruction address to its row index, for navigation.
+    pub row_of: HashMap<u64, usize>,
 }
 
 pub struct AppState {
@@ -95,6 +112,12 @@ pub struct AppState {
     pub stack_bytes: Vec<u8>,
     pub stack_base: u64,
     pub disasm_address: u64,
+    /// Text typed into the disassembly "Go to" box.
+    pub disasm_goto: String,
+    /// When set, the disassembly panel scrolls this address into view once.
+    pub disasm_scroll_to: Option<u64>,
+    /// Cached linear disassembly of the region around `disasm_address`.
+    pub disasm_cache: Option<DisasmView>,
     pub selected_address: Option<u64>,
     pub console_input: String,
     pub console_history: Vec<String>,
@@ -121,6 +144,7 @@ pub struct AppState {
     pub hide_zero_registers: bool,
     pub register_search: String,
     pub modules_search: String,
+    pub strings_search: String,
     pub processes_search: String,
     pub processes_cache: Vec<(u32, String)>,
     pub selected_pid: Option<u32>,
@@ -128,7 +152,6 @@ pub struct AppState {
     pub mem_patch_addr: String,
     pub mem_patch_bytes: String,
     pub adapter_target: DebugTarget,
-    pub graph_mode: bool,
     pub disasm_following_pc: bool,
 
     /// Dockable panel layout. Tabs can be dragged between regions, split,
@@ -171,6 +194,9 @@ impl AppState {
             stack_bytes: vec![],
             stack_base: 0,
             disasm_address: 0,
+            disasm_goto: String::new(),
+            disasm_scroll_to: None,
+            disasm_cache: None,
             selected_address: None,
             console_input: String::new(),
             console_history: vec![],
@@ -193,6 +219,7 @@ impl AppState {
             hide_zero_registers: true,
             register_search: String::new(),
             modules_search: String::new(),
+            strings_search: String::new(),
             processes_search: String::new(),
             processes_cache: vec![],
             selected_pid: None,
@@ -200,7 +227,6 @@ impl AppState {
             mem_patch_addr: String::new(),
             mem_patch_bytes: String::new(),
             adapter_target: target,
-            graph_mode: false,
             disasm_following_pc: true,
             dock: default_layout(),
             command_tx,
@@ -217,7 +243,10 @@ impl AppState {
         ) {
             Ok(info) => {
                 let bytes = std::fs::read(&path).unwrap_or_default();
-                self.disasm_address = info.entry_point;
+                self.navigate_disasm(info.entry_point);
+                // Drop any cache from a previously loaded binary; the new image
+                // may reuse the same arch/addresses with different bytes.
+                self.disasm_cache = None;
                 self.adapter_target.executable = Some(path.clone());
                 self.cfg.target = Some(path);
                 self.console_output.push("[+] Binary loaded".into());
@@ -253,6 +282,97 @@ impl AppState {
         } else {
             self.console_output.push("[!] no binary loaded".into());
         }
+    }
+
+    /// Point the disassembly view at `address`: move the cursor, request a
+    /// scroll, and mark it selected. The linear disassembly itself is rebuilt
+    /// lazily by [`AppState::ensure_disasm`] only when the address leaves the
+    /// currently cached region.
+    pub fn navigate_disasm(&mut self, address: u64) {
+        self.disasm_address = address;
+        self.disasm_scroll_to = Some(address);
+        self.selected_address = Some(address);
+    }
+
+    /// Ensure `disasm_cache` holds a linear disassembly covering
+    /// `disasm_address`. Rebuilds only when the architecture changes or the
+    /// address falls outside the cached region, so it is cheap to call every
+    /// frame.
+    pub fn ensure_disasm(&mut self) {
+        let arch = self.binary.as_ref().map(|b| b.architecture).unwrap_or(Architecture::X86_64);
+        let addr = self.disasm_address;
+        if let Some(c) = &self.disasm_cache {
+            // `build_disasm_view` never stores an empty view, so an in-range
+            // hit on the same arch is always reusable.
+            if c.arch == arch && addr >= c.region_start && addr < c.region_end {
+                return;
+            }
+        }
+        self.disasm_cache = self.build_disasm_view(arch, addr);
+    }
+
+    /// Slice already-loaded image bytes for the virtual range
+    /// `[addr, addr + len)`, mapping through the section that contains `addr`.
+    /// Returns empty when the address isn't backed by file bytes. This is the
+    /// single place the GUI turns a virtual address into image bytes.
+    pub fn image_bytes(&self, addr: u64, len: usize) -> Vec<u8> {
+        let (Some(b), Some(file_bytes)) = (&self.binary, &self.binary_bytes) else {
+            return Vec::new();
+        };
+        let Some(s) = b.section_containing(addr) else {
+            return Vec::new();
+        };
+        let file_off = (s.file_offset + (addr - s.virtual_address)) as usize;
+        let end = (file_off + len).min(file_bytes.len());
+        if file_off < end {
+            file_bytes[file_off..end].to_vec()
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Disassemble the whole contiguous region containing `addr` in one pass.
+    fn build_disasm_view(&self, arch: Architecture, addr: u64) -> Option<DisasmView> {
+        let (start, len) = self.disasm_region(addr);
+        let bytes = self.image_bytes(start, len);
+        if bytes.is_empty() {
+            return None;
+        }
+        let dis = Disassembler::new(arch).ok()?;
+        let insns = dis.disassemble_all(&bytes, start).unwrap_or_default();
+        if insns.is_empty() {
+            return None;
+        }
+        // The cache is authoritative for the whole requested window, not just
+        // the decoded/file-backed prefix. Otherwise an undecodable byte
+        // mid-section, or a section whose virtual size exceeds its file size
+        // (a file-less tail), would make navigation into that range re-decode
+        // every frame.
+        let region_end = start + len as u64;
+        let row_of = insns.iter().enumerate().map(|(i, ins)| (ins.address, i)).collect();
+        Some(DisasmView { arch, region_start: start, region_end, insns, row_of })
+    }
+
+    /// Pick the byte range to disassemble: the section containing `addr` (so
+    /// the whole function/section is scrollable), else a bounded window.
+    fn disasm_region(&self, addr: u64) -> (u64, usize) {
+        // Cap a single decoded region so a pathologically large section can't
+        // stall the UI; 4 MiB of code is far more than any CTF target.
+        const MAX_REGION: u64 = 4 * 1024 * 1024;
+        if let Some(s) = self.binary.as_ref().and_then(|b| b.section_containing(addr)) {
+            let size = s.virtual_span();
+            if size <= MAX_REGION {
+                return (s.virtual_address, size as usize);
+            }
+            // Oversized section: decode a MAX_REGION window that still contains
+            // `addr`, clamped to the section bounds.
+            let start = addr
+                .saturating_sub(MAX_REGION / 2)
+                .max(s.virtual_address)
+                .min(s.virtual_address + size - MAX_REGION);
+            return (start, MAX_REGION as usize);
+        }
+        (addr, 4096)
     }
 
     pub fn send(&self, cmd: DebugCommand) {
@@ -297,7 +417,15 @@ fn worker_main(cfg: DebugConfig, cmd_rx: Receiver<DebugCommand>, upd_tx: Sender<
     };
     let publish_after_stop = |b: &mut Box<dyn DebugBackend + Send>, tx: &Sender<BackendUpdate>| {
         send_state(b.as_ref(), tx);
-        if let Ok(rf) = b.read_registers(None) { let _ = tx.send(BackendUpdate::Registers(rf)); }
+        if let Ok(rf) = b.read_registers(None) {
+            // Snapshot the top of the stack so the Stack panel has data to show.
+            if let Some(sp) = rf.sp() {
+                if let Ok(data) = b.read_memory(sp, 256) {
+                    let _ = tx.send(BackendUpdate::StackBytes(sp, data));
+                }
+            }
+            let _ = tx.send(BackendUpdate::Registers(rf));
+        }
         if let Ok(t) = b.list_threads() { let _ = tx.send(BackendUpdate::Threads(t)); }
         if let Ok(m) = b.list_modules() { let _ = tx.send(BackendUpdate::Modules(m)); }
         if let Ok(st) = b.stack_trace(0) { let _ = tx.send(BackendUpdate::StackTrace(st)); }

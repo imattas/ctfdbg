@@ -88,7 +88,7 @@ fn short_hint(value: u64, state: &AppState) -> String {
         return format!("{}+0x{:x}", m.name, value - m.base);
     }
     if let Some(b) = &state.binary {
-        if let Some(s) = b.sections.iter().find(|s| value >= s.virtual_address && value < s.virtual_address + s.virtual_size) {
+        if let Some(s) = b.section_containing(value) {
             return format!("{}+0x{:x}", s.name, value - s.virtual_address);
         }
     }
