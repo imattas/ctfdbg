@@ -45,6 +45,7 @@ impl App {
                         self.state.active_thread = Some(*thread_id);
                         if self.state.disasm_following_pc {
                             self.state.disasm_address = *address;
+                            self.state.disasm_scroll_to = Some(*address);
                         }
                         self.state.selected_address = Some(*address);
                     }
@@ -72,6 +73,10 @@ impl App {
             BackendUpdate::MemoryAt(addr, data) => {
                 self.state.memory_view_address = addr;
                 self.state.memory_bytes = data;
+            }
+            BackendUpdate::StackBytes(base, data) => {
+                self.state.stack_base = base;
+                self.state.stack_bytes = data;
             }
             BackendUpdate::TargetOutput(bytes) => {
                 // Append captured target output, splitting into console lines.
@@ -140,8 +145,7 @@ impl App {
             Action::OverrideIpDialog => self.state.show_override_ip = true,
             Action::JumpToIp => {
                 if let Some(ip) = self.state.registers.pc() {
-                    self.state.disasm_address = ip;
-                    self.state.selected_address = Some(ip);
+                    self.state.navigate_disasm(ip);
                 }
             }
             Action::ToggleBreakpointAt(addr) => {
@@ -155,10 +159,7 @@ impl App {
                 self.state.send(DebugCommand::SetHardwareBreakpoint(address, kind, size));
             }
             Action::RunToAddress(a) => self.state.send(DebugCommand::RunToAddress(a)),
-            Action::NavigateTo(a) => {
-                self.state.disasm_address = a;
-                self.state.selected_address = Some(a);
-            }
+            Action::NavigateTo(a) => self.state.navigate_disasm(a),
             Action::SetActiveThread(tid) => self.state.active_thread = Some(tid),
             Action::ConsoleCommand(line) => crate::gui::panels::debugger_console::execute(&mut self.state, &line),
             Action::RunPlugin(id) => {

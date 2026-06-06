@@ -30,11 +30,16 @@ with an [`egui`](https://github.com/emilk/egui) interface.
   [`capstone`](https://github.com/capstone-rust/capstone-rs), driven by a
   Rust port of the binutils/BFD architecture registry (see
   [Architecture support](#architecture-support)) — ~80 BFD families
-  described, 13 with live decoders across both byte orders. **Syntax-coloured**
-  output (mnemonics by instruction class; registers / immediates / memory
-  keywords / punctuation in operands), current-PC and breakpoint highlighting,
-  right-click breakpoint toggle, jump to IP, run to here, copy address /
-  instruction
+  described, 13 with live decoders across both byte orders. The disassembly
+  view decodes the **entire containing section at once** and scrolls
+  continuously (virtualised, so even large sections stay smooth) — no need to
+  re-enter an address to page through code. Navigate with the **Go to** box
+  (hex address or symbol name), **Entry** / **PC** buttons, or the **Follow
+  PC** toggle that keeps the program counter in view while stepping.
+  **Syntax-coloured** output (mnemonics by instruction class; registers /
+  immediates / memory keywords / punctuation in operands), current-PC and
+  breakpoint highlighting, right-click breakpoint toggle, jump to IP, run to
+  here, copy address / instruction
 - PE / ELF / Mach-O / raw-shellcode parsing via [`goblin`](https://github.com/m4b/goblin),
   with security feature reporting (ASLR, DEP/NX, CFG, SafeSEH,
   HighEntropyVA) and BFD-aware ELF `e_machine` → architecture mapping
@@ -179,7 +184,8 @@ the linear MBA seen in CTF and malware.
 ## Supported file formats
 
 - PE / PE32+ (Windows executables, DLLs)
-- ELF (Linux executables; analysis only — Linux ptrace backend is a stub)
+- ELF (Linux executables; full ptrace debug backend on x86_64 — launch,
+  step, breakpoints, register/memory read-write, hardware watchpoints)
 - Mach-O (analysis only)
 - Raw shellcode (`--format raw --arch x86_64 --base-address 0x...`)
 
@@ -251,19 +257,22 @@ lines are highlighted the same way as the disassembly panel.
 
 ## Known limitations / TODOs
 
-- Hardware breakpoints are not yet wired (DR0..DR3 + DR7). The dialog is
-  in place but currently logs `Unsupported`.
-- Conditional-breakpoint expressions are stored but not yet evaluated by
-  the backend (TODO: hook `expressions` into stop handling).
+- Hardware breakpoints (DR0–DR3 + DR7) are wired on the Linux x86/x86_64
+  backend, including data watchpoints. The Windows backend falls back to a
+  software breakpoint for execute-type requests and reports data watchpoints
+  as `Unsupported`.
 - Symbol resolution from PDBs is not implemented; only PE export/import
   symbols and section labels are surfaced.
-- The Linux ptrace backend is a stub returning `Unsupported`.
 - Step Over / Step Return are implemented as repeated single-steps with
   heuristics; full call-frame-aware stepping is a TODO.
-- Standard-input redirection to the launched target is not yet wired
-  (the Target Console panel only shows captured output).
+- Standard-input redirection works for targets launched by the Linux
+  backend; the Windows backend does not yet wire it (the Target Console
+  panel still shows captured output for both).
 - Only x86_64 register set is fully wired through the Windows
   `CONTEXT` reader; x86_32 needs a parallel implementation.
+- The disassembly view decodes from the loaded file image, so
+  self-modifying or runtime-patched code is not reflected live; use the
+  Memory panel to inspect mutated bytes.
 - No native file picker dependency — paths are typed in the Adapter
   Settings dialog.
 

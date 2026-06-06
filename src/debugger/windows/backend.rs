@@ -125,7 +125,10 @@ impl WindowsDebugBackend {
 
     fn read_byte(&self, address: u64) -> DbgResult<u8> {
         let v = self.read_memory(address, 1)?;
-        Ok(v[0])
+        v.first().copied().ok_or_else(|| DbgError::Memory {
+            address,
+            message: "short read (0 bytes)".into(),
+        })
     }
 
     fn write_byte(&self, address: u64, byte: u8) -> DbgResult<()> {
@@ -566,8 +569,14 @@ impl DebugBackend for WindowsDebugBackend {
         let regs = self.read_registers(None)?;
         let sp = regs.sp().ok_or_else(|| DbgError::Register("missing sp".into()))?;
         let bytes = self.read_memory(sp, 8)?;
+        if bytes.len() < 8 {
+            return Err(DbgError::Memory {
+                address: sp,
+                message: "short read of return address".into(),
+            });
+        }
         let mut buf = [0u8; 8];
-        buf.copy_from_slice(&bytes);
+        buf.copy_from_slice(&bytes[..8]);
         let ret_addr = u64::from_le_bytes(buf);
         self.run_to_address(ret_addr)
     }

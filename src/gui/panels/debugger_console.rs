@@ -171,7 +171,7 @@ pub fn execute(state: &mut AppState, line: &str) {
                 }
             }
             Command::Disasm(addr) => {
-                if let Ok(a) = parse_u64(&addr) { state.disasm_address = a; }
+                if let Ok(a) = parse_u64(&addr) { state.navigate_disasm(a); }
             }
             Command::Search(pat) => {
                 for line in search_loaded(state, &pat) {
